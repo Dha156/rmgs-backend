@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const crypto = require('crypto');
 const { Pool } = require('pg');
@@ -18,6 +19,25 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+// Helper function for HTTPS GET requests (Safe for all Node.js versions)
+function safeHttpsGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }).on('error', (err) => {
+      reject(err);
+    });
+  });
+}
 
 // Automatic Tables Initialization
 async function initDatabase() {
@@ -180,12 +200,10 @@ app.post('/api/auth/send-otp', async (req, res) => {
 
   try {
     const apiKey = process.env.TWO_FACTOR_API_KEY || '93132bce-d69f-11f1-ac3e-0200cd936042';
-    const templateName = 'OTP1'; // Apna 2Factor approved template name
+    const templateName = 'OTP1';
 
     const url = `https://2factor.in/API/V1/${apiKey}/SMS/${mobile}/AUTOGEN/${templateName}`;
-    
-    const response = await fetch(url);
-    const data = await response.json();
+    const data = await safeHttpsGet(url);
 
     if (data.Status === 'Success') {
       otpStore.set(mobile, { sessionId: data.Details, expiresAt: Date.now() + 5 * 60 * 1000 });
@@ -217,8 +235,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     const apiKey = process.env.TWO_FACTOR_API_KEY || '93132bce-d69f-11f1-ac3e-0200cd936042';
     const verifyUrl = `https://2factor.in/API/V1/${apiKey}/SMS/VERIFY/${record.sessionId}/${otp}`;
     
-    const response = await fetch(verifyUrl);
-    const data = await response.json();
+    const data = await safeHttpsGet(verifyUrl);
 
     if (data.Status === 'Success') {
       otpStore.delete(mobile);
