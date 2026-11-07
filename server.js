@@ -19,7 +19,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Automatic Tables Initialization Function
+// Automatic Tables Initialization Function (Wallets, Transactions, Admin, KYC, Audit)
 async function initDatabase() {
   try {
     await pool.query(`
@@ -42,10 +42,43 @@ async function initDatabase() {
       );
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS admin_users (
+          id SERIAL PRIMARY KEY,
+          username VARCHAR(100) UNIQUE NOT NULL,
+          password_hash VARCHAR(255) NOT NULL,
+          role VARCHAR(50) DEFAULT 'moderator',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS kyc_records (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(255) UNIQUE NOT NULL,
+          pan_number VARCHAR(20),
+          document_status VARCHAR(50) DEFAULT 'PENDING',
+          verified_at TIMESTAMP,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+          id SERIAL PRIMARY KEY,
+          actor_id VARCHAR(255) NOT NULL,
+          action_type VARCHAR(100) NOT NULL,
+          details TEXT,
+          ip_address VARCHAR(50),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kyc_user_id ON kyc_records(user_id);`);
 
-    console.log("Database tables (wallets & transactions) verified/created successfully!");
+    console.log("All Database tables verified/created successfully!");
   } catch (err) {
     console.error("Error creating database tables:", err);
   }
@@ -92,42 +125,34 @@ function hashServerSeed(serverSeed) {
 }
 
 function calculateProvablyFairOutcome(serverSeed, clientSeed, nonce) {
-  // Combine Server Seed, Client Seed, and Nonce
   const message = `${serverSeed}:${clientSeed}:${nonce}`;
   const hash = crypto.createHmac('sha256', serverSeed).update(message).digest('hex');
-  
-  // Convert first 8 characters of hash to an integer for outcome calculation
   const intVal = parseInt(hash.slice(0, 8), 16);
-  const outcome = (intVal % 100) + 1; // Returns a number between 1 and 100
+  const outcome = (intVal % 100) + 1;
   return { outcome, hash };
 }
 
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
-  // User connection par ek active Provably Fair session generate karein
   let currentServerSeed = generateServerSeed();
   let serverSeedHash = hashServerSeed(currentServerSeed);
   let nonce = 1;
 
-  // Client ko current server seed ka hash bhej dein (game start hone se pehle)
   socket.emit('provably-fair:init', { serverSeedHash });
 
   socket.on('game:spin', async (data) => {
     const { userId, betAmount, clientSeed = 'default_client_seed' } = data;
 
-    // 1. Wallet balance deduct karein securely via ACID transaction
     const txResult = await placeBet(userId, betAmount);
     if (!txResult.success) {
       return socket.emit('game:error', { message: txResult.error });
     }
 
-    // 2. Provably Fair Outcome calculate karein
-    const { outcome, hash } = calculateProvablyFairOutcome(currentServerSeed, clientSeed, nonce);
+    const { outcome } = calculateProvablyFairOutcome(currentServerSeed, clientSeed, nonce);
     const isWin = outcome > 50;
     let winnings = isWin ? betAmount * 2 : 0;
 
-    // 3. Client ko result aur verification data bhejein
     socket.emit('game:result', {
       outcome,
       isWin,
@@ -135,11 +160,9 @@ io.on('connection', (socket) => {
       newBalance: txResult.newBalance + winnings,
       nonce,
       serverSeedHash,
-      // Note: Asli game me server seed round complete hone ke baad reveal kiya jata hai
-      revealedServerSeed: currentServerSeed 
+      revealedServerSeed: currentServerSeed
     });
 
-    // Nonce ko increment karein agle bet ke liye
     nonce++;
   });
 
@@ -149,12 +172,11 @@ io.on('connection', (socket) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('RMG Backend & Provably Fair WebSocket Server is running successfully!');
+  res.send('RMG Backend, Provably Fair & Admin Systems running successfully!');
 });
 
 const PORT = process.env.PORT || 4000;
 
-// Initialize Database and Start Server
 initDatabase().then(() => {
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
