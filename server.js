@@ -19,6 +19,38 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// Automatic Tables Initialization Function
+async function initDatabase() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS wallets (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(255) UNIQUE NOT NULL,
+          balance NUMERIC(12, 2) DEFAULT 0.00 CHECK (balance >= 0),
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS transactions (
+          id SERIAL PRIMARY KEY,
+          user_id VARCHAR(255) NOT NULL,
+          amount NUMERIC(12, 2) NOT NULL,
+          type VARCHAR(50) NOT NULL,
+          status VARCHAR(50) NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id);`);
+
+    console.log("Database tables (wallets & transactions) verified/created successfully!");
+  } catch (err) {
+    console.error("Error creating database tables:", err);
+  }
+}
+
 // Wallet transaction function with row-level locking
 async function placeBet(userId, betAmount) {
   const client = await pool.connect();
@@ -95,6 +127,10 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+
+// Initialize Database and Start Server
+initDatabase().then(() => {
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
 });
