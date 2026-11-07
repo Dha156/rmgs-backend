@@ -276,6 +276,25 @@ io.on('connection', (socket) => {
   socket.emit('provably-fair:init', { serverSeedHash });
   socket.emit('game:state', { gameState, currentMultiplier, roundTimer });
 
+  // --- 1. Real Multiplayer Room Join & Management ---
+  socket.on('room:join', (data) => {
+    const { roomName, userId, phone } = data;
+    socket.join(roomName);
+    console.log(`User ${userId} (${phone}) joined room: ${roomName}`);
+    io.to(roomName).emit('room:player-joined', { userId, phone, socketId: socket.id });
+  });
+
+  // --- 2. Real-time Multiplayer Table Game Move Handler ---
+  socket.on('game:action', (data) => {
+    const { roomName, action, userId, amount } = data;
+    io.to(roomName).emit('game:action-broadcast', {
+      userId,
+      action, // e.g., 'CHAAL', 'PACK', 'SHOW'
+      amount,
+      timestamp: Date.now()
+    });
+  });
+
   socket.on('game:spin', async (data) => {
     const { userId, betAmount, clientSeed = 'default_client_seed' } = data;
 
