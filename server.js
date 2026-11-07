@@ -167,10 +167,10 @@ function startAviatorGameLoop() {
   }, 1000);
 }
 
-// --- OTP AUTHENTICATION SYSTEM (Fast2SMS) ---
+// --- OTP AUTHENTICATION SYSTEM (2Factor API) ---
 const otpStore = new Map();
 
-// 1. Send OTP Route
+// 1. Send OTP via 2Factor API
 app.post('/api/auth/send-otp', async (req, res) => {
   const { mobile } = req.body;
   
@@ -178,35 +178,34 @@ app.post('/api/auth/send-otp', async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid mobile number' });
   }
 
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 mins validity
-
-  otpStore.set(mobile, { otp, expiresAt });
-
   try {
-    const apiKey = process.env.FAST2SMS_API_KEY || 'YOUR_FAST2SMS_API_KEY';
-    
-    if (apiKey !== 'YOUR_FAST2SMS_API_KEY') {
-      const smsUrl = `https://www.fast2sms.com/dev/bulkV2?authorization=${apiKey}&route=otp&variables_values=${otp}&flash=0&numbers=${mobile}`;
-      await fetch(smsUrl);
-    } else {
-      console.log(`[DEV MODE] OTP for ${mobile}: ${otp}`);
-    }
+    const apiKey = process.env.TWO_FACTOR_API_KEY || '93132bce-d69f-11f1-ac3e-0200cd936042';
+    const templateName = 'OTP1'; // Apna 2Factor approved template name
 
-    res.json({ success: true, message: 'OTP sent successfully', devOtp: otp });
+    const url = `https://2factor.in/API/V1/${apiKey}/SMS/${mobile}/AUTOGEN/${templateName}`;
+    
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.Status === 'Success') {
+      otpStore.set(mobile, { sessionId: data.Details, expiresAt: Date.now() + 5 * 60 * 1000 });
+      res.json({ success: true, message: 'OTP sent successfully via 2Factor' });
+    } else {
+      res.status(400).json({ success: false, message: data.Details || 'Failed to send OTP' });
+    }
   } catch (error) {
-    console.error('Error sending OTP:', error);
+    console.error('2Factor API Error:', error);
     res.status(500).json({ success: false, message: 'Failed to send OTP' });
   }
 });
 
-// 2. Verify OTP & Auto-Register / Login Route
+// 2. Verify OTP via 2Factor API & Login / Register
 app.post('/api/auth/verify-otp', async (req, res) => {
   const { mobile, otp } = req.body;
 
   const record = otpStore.get(mobile);
   if (!record) {
-    return res.status(400).json({ success: false, message: 'OTP not requested or expired' });
+    return res.status(400).json({ success: false, message: 'OTP session expired or not found' });
   }
 
   if (Date.now() > record.expiresAt) {
@@ -214,32 +213,38 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     return res.status(400).json({ success: false, message: 'OTP expired' });
   }
 
-  if (record.otp !== otp) {
-    return res.status(400).json({ success: false, message: 'Incorrect OTP' });
-  }
-
-  otpStore.delete(mobile);
-
   try {
-    let walletRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1', [mobile]);
+    const apiKey = process.env.TWO_FACTOR_API_KEY || '93132bce-d69f-11f1-ac3e-0200cd936042';
+    const verifyUrl = `https://2factor.in/API/V1/${apiKey}/SMS/VERIFY/${record.sessionId}/${otp}`;
     
-    if (walletRes.rows.length === 0) {
-      walletRes = await pool.query(
-        'INSERT INTO wallets (user_id, balance) VALUES ($1, $2) RETURNING *',
-        [mobile, 0.00]
-      );
-    }
+    const response = await fetch(verifyUrl);
+    const data = await response.json();
 
-    res.json({
-      success: true,
-      message: 'Login successful',
-      user: {
-        mobile,
-        balance: walletRes.rows[0].balance
+    if (data.Status === 'Success') {
+      otpStore.delete(mobile);
+
+      let walletRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1', [mobile]);
+      
+      if (walletRes.rows.length === 0) {
+        walletRes = await pool.query(
+          'INSERT INTO wallets (user_id, balance) VALUES ($1, $2) RETURNING *',
+          [mobile, 0.00]
+        );
       }
-    });
+
+      res.json({
+        success: true,
+        message: 'Login successful',
+        user: {
+          mobile,
+          balance: walletRes.rows[0].balance
+        }
+      });
+    } else {
+      res.status(400).json({ success: false, message: 'Incorrect OTP' });
+    }
   } catch (err) {
-    console.error('Database error during login:', err);
+    console.error('Database or Verification error:', err);
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
@@ -285,7 +290,7 @@ io.on('connection', (socket) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('RMG Production Real-Time WebSocket & OTP Server is running successfully!');
+  res.send('RMG Production Real-Time WebSocket & 2Factor OTP Server is running successfully!');
 });
 
 const PORT = process.env.PORT || 4000;
