@@ -279,20 +279,48 @@ io.on('connection', (socket) => {
   socket.on('game:spin', async (data) => {
     const { userId, betAmount, clientSeed = 'default_client_seed' } = data;
 
+    // 1. Deduct bet amount securely using ACID transaction
     const txResult = await placeBet(userId, betAmount);
     if (!txResult.success) {
       return socket.emit('game:error', { message: txResult.error });
     }
 
+    // 2. Calculate game result
     const { outcome } = calculateProvablyFairOutcome(currentServerSeed, clientSeed, nonce);
     const isWin = outcome > 50;
     let winnings = isWin ? betAmount * 2 : 0;
 
+    let finalBalance = txResult.newBalance;
+
+    // 3. If user wins, credit winnings back to PostgreSQL database securely
+    if (isWin && winnings > 0) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const updateRes = await client.query(
+          'UPDATE wallets SET balance = balance + $1, updated_at = NOW() WHERE user_id = $2 RETURNING balance',
+          [winnings, userId]
+        );
+        await client.query(
+          `INSERT INTO transactions (user_id, amount, type, status) VALUES ($1, $2, 'WIN', 'SUCCESS')`,
+          [winnings, userId]
+        );
+        await client.query('COMMIT');
+        finalBalance = parseFloat(updateRes.rows[0].balance);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('Error crediting winnings to DB:', err);
+      } finally {
+        client.release();
+      }
+    }
+
+    // 4. Emit the final result to the socket client
     socket.emit('game:result', {
       outcome,
       isWin,
       winnings,
-      newBalance: txResult.newBalance + winnings,
+      newBalance: finalBalance,
       nonce,
       serverSeedHash,
       revealedServerSeed: currentServerSeed
