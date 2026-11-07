@@ -147,7 +147,6 @@ function startAviatorGameLoop() {
       if (roundTimer <= 0) {
         gameState = 'RUNNING';
         currentMultiplier = 1.00;
-        // Generate random crash point between 1.10x and 5.00x using crypto RNG
         const randomBytes = crypto.randomBytes(4).readUInt32BE(0);
         crashPoint = parseFloat((1.10 + (randomBytes % 400) / 100).toFixed(2));
         io.emit('game:started', { crashPoint });
@@ -162,11 +161,88 @@ function startAviatorGameLoop() {
         roundTimer = 5;
         setTimeout(() => {
           gameState = 'WAITING';
-        }, 3000); // Wait 3 seconds before next round
+        }, 3000);
       }
     }
-  }, 1000); // Every 1 second
+  }, 1000);
 }
+
+// --- OTP AUTHENTICATION SYSTEM (Fast2SMS) ---
+const otpStore = new Map();
+
+// 1. Send OTP Route
+app.post('/api/auth/send-otp', async (req, res) => {
+  const { mobile } = req.body;
+  
+  if (!mobile || mobile.length !== 10) {
+    return res.status(400).json({ success: false, message: 'Invalid mobile number' });
+  }
+
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = Date.now() + 5 * 60 * 1000; // 5 mins validity
+
+  otpStore.set(mobile, { otp, expiresAt });
+
+  try {
+    const apiKey = process.env.FAST2SMS_API_KEY || 'YOUR_FAST2SMS_API_KEY';
+    
+    if (apiKey !== 'YOUR_FAST2SMS_API_KEY') {
+      const smsUrl = `https://www.fast2sms.com/dev/bulkV2?authorization=${apiKey}&route=otp&variables_values=${otp}&flash=0&numbers=${mobile}`;
+      await fetch(smsUrl);
+    } else {
+      console.log(`[DEV MODE] OTP for ${mobile}: ${otp}`);
+    }
+
+    res.json({ success: true, message: 'OTP sent successfully', devOtp: otp });
+  } catch (error) {
+    console.error('Error sending OTP:', error);
+    res.status(500).json({ success: false, message: 'Failed to send OTP' });
+  }
+});
+
+// 2. Verify OTP & Auto-Register / Login Route
+app.post('/api/auth/verify-otp', async (req, res) => {
+  const { mobile, otp } = req.body;
+
+  const record = otpStore.get(mobile);
+  if (!record) {
+    return res.status(400).json({ success: false, message: 'OTP not requested or expired' });
+  }
+
+  if (Date.now() > record.expiresAt) {
+    otpStore.delete(mobile);
+    return res.status(400).json({ success: false, message: 'OTP expired' });
+  }
+
+  if (record.otp !== otp) {
+    return res.status(400).json({ success: false, message: 'Incorrect OTP' });
+  }
+
+  otpStore.delete(mobile);
+
+  try {
+    let walletRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1', [mobile]);
+    
+    if (walletRes.rows.length === 0) {
+      walletRes = await pool.query(
+        'INSERT INTO wallets (user_id, balance) VALUES ($1, $2) RETURNING *',
+        [mobile, 0.00]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Login successful',
+      user: {
+        mobile,
+        balance: walletRes.rows[0].balance
+      }
+    });
+  } catch (err) {
+    console.error('Database error during login:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
 
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
@@ -209,7 +285,7 @@ io.on('connection', (socket) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('RMG Production Real-Time WebSocket Server is running successfully!');
+  res.send('RMG Production Real-Time WebSocket & OTP Server is running successfully!');
 });
 
 const PORT = process.env.PORT || 4000;
@@ -217,6 +293,6 @@ const PORT = process.env.PORT || 4000;
 initDatabase().then(() => {
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
-    startAviatorGameLoop(); // Start real-time background game loop
+    startAviatorGameLoop();
   });
 });
