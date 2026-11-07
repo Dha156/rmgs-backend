@@ -51,7 +51,7 @@ async function initDatabase() {
   }
 }
 
-// Wallet transaction function with row-level locking
+// Wallet transaction function with row-level locking (ACID Compliance)
 async function placeBet(userId, betAmount) {
   const client = await pool.connect();
   try {
@@ -82,39 +82,65 @@ async function placeBet(userId, betAmount) {
   }
 }
 
-// Secure Server-side RNG function
-function generateSecureRNG(min, max) {
-  const range = max - min + 1;
-  const bytesNeeded = Math.ceil(Math.log2(range) / 8);
-  const maxValidValue = Math.pow(256, bytesNeeded) - Math.floor(Math.pow(256, bytesNeeded) % range);
-  let randomValue;
-  do {
-    const buffer = crypto.randomBytes(bytesNeeded);
-    randomValue = buffer.readUIntBE(0, bytesNeeded);
-  } while (randomValue >= maxValidValue);
-  return min + (randomValue % range);
+// --- PROVABLY FAIR RNG ENGINE ---
+function generateServerSeed() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function hashServerSeed(serverSeed) {
+  return crypto.createHash('sha256').update(serverSeed).digest('hex');
+}
+
+function calculateProvablyFairOutcome(serverSeed, clientSeed, nonce) {
+  // Combine Server Seed, Client Seed, and Nonce
+  const message = `${serverSeed}:${clientSeed}:${nonce}`;
+  const hash = crypto.createHmac('sha256', serverSeed).update(message).digest('hex');
+  
+  // Convert first 8 characters of hash to an integer for outcome calculation
+  const intVal = parseInt(hash.slice(0, 8), 16);
+  const outcome = (intVal % 100) + 1; // Returns a number between 1 and 100
+  return { outcome, hash };
 }
 
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
+  // User connection par ek active Provably Fair session generate karein
+  let currentServerSeed = generateServerSeed();
+  let serverSeedHash = hashServerSeed(currentServerSeed);
+  let nonce = 1;
+
+  // Client ko current server seed ka hash bhej dein (game start hone se pehle)
+  socket.emit('provably-fair:init', { serverSeedHash });
+
   socket.on('game:spin', async (data) => {
-    const { userId, betAmount } = data;
+    const { userId, betAmount, clientSeed = 'default_client_seed' } = data;
+
+    // 1. Wallet balance deduct karein securely via ACID transaction
     const txResult = await placeBet(userId, betAmount);
     if (!txResult.success) {
       return socket.emit('game:error', { message: txResult.error });
     }
 
-    const outcome = generateSecureRNG(1, 100);
+    // 2. Provably Fair Outcome calculate karein
+    const { outcome, hash } = calculateProvablyFairOutcome(currentServerSeed, clientSeed, nonce);
     const isWin = outcome > 50;
     let winnings = isWin ? betAmount * 2 : 0;
 
+    // 3. Client ko result aur verification data bhejein
     socket.emit('game:result', {
       outcome,
       isWin,
       winnings,
-      newBalance: txResult.newBalance + winnings
+      newBalance: txResult.newBalance + winnings,
+      nonce,
+      serverSeedHash,
+      // Note: Asli game me server seed round complete hone ke baad reveal kiya jata hai
+      revealedServerSeed: currentServerSeed 
     });
+
+    // Nonce ko increment karein agle bet ke liye
+    nonce++;
   });
 
   socket.on('disconnect', () => {
@@ -123,7 +149,7 @@ io.on('connection', (socket) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('RMG Backend & WebSocket Server is running successfully!');
+  res.send('RMG Backend & Provably Fair WebSocket Server is running successfully!');
 });
 
 const PORT = process.env.PORT || 4000;
