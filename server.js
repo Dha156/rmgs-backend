@@ -13,13 +13,13 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-// PostgreSQL connection (Render ke liye SSL zaroori hai)
+// PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Automatic Tables Initialization Function (Wallets, Transactions, Admin, KYC, Audit)
+// Automatic Tables Initialization
 async function initDatabase() {
   try {
     await pool.query(`
@@ -132,6 +132,42 @@ function calculateProvablyFairOutcome(serverSeed, clientSeed, nonce) {
   return { outcome, hash };
 }
 
+// --- REAL-TIME GAME LOOP (Aviator / Crash Style) ---
+let gameState = 'WAITING'; // WAITING, RUNNING, CRASHED
+let currentMultiplier = 1.00;
+let crashPoint = 1.50;
+let roundTimer = 5; // 5 seconds betting time
+
+function startAviatorGameLoop() {
+  setInterval(() => {
+    if (gameState === 'WAITING') {
+      roundTimer--;
+      io.emit('game:timer', { timer: roundTimer });
+
+      if (roundTimer <= 0) {
+        gameState = 'RUNNING';
+        currentMultiplier = 1.00;
+        // Generate random crash point between 1.10x and 5.00x using crypto RNG
+        const randomBytes = crypto.randomBytes(4).readUInt32BE(0);
+        crashPoint = parseFloat((1.10 + (randomBytes % 400) / 100).toFixed(2));
+        io.emit('game:started', { crashPoint });
+      }
+    } else if (gameState === 'RUNNING') {
+      currentMultiplier = parseFloat((currentMultiplier + 0.05).toFixed(2));
+      io.emit('game:tick', { multiplier: currentMultiplier });
+
+      if (currentMultiplier >= crashPoint) {
+        gameState = 'CRASHED';
+        io.emit('game:crashed', { multiplier: crashPoint });
+        roundTimer = 5;
+        setTimeout(() => {
+          gameState = 'WAITING';
+        }, 3000); // Wait 3 seconds before next round
+      }
+    }
+  }, 1000); // Every 1 second
+}
+
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
@@ -140,6 +176,7 @@ io.on('connection', (socket) => {
   let nonce = 1;
 
   socket.emit('provably-fair:init', { serverSeedHash });
+  socket.emit('game:state', { gameState, currentMultiplier, roundTimer });
 
   socket.on('game:spin', async (data) => {
     const { userId, betAmount, clientSeed = 'default_client_seed' } = data;
@@ -172,7 +209,7 @@ io.on('connection', (socket) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('RMG Backend, Provably Fair & Admin Systems running successfully!');
+  res.send('RMG Production Real-Time WebSocket Server is running successfully!');
 });
 
 const PORT = process.env.PORT || 4000;
@@ -180,5 +217,6 @@ const PORT = process.env.PORT || 4000;
 initDatabase().then(() => {
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    startAviatorGameLoop(); // Start real-time background game loop
   });
 });
