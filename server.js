@@ -47,6 +47,7 @@ async function initDatabase() {
           id SERIAL PRIMARY KEY,
           user_id VARCHAR(255) UNIQUE NOT NULL,
           balance NUMERIC(12, 2) DEFAULT 0.00 CHECK (balance >= 0),
+          vip_level INTEGER DEFAULT 0,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -244,8 +245,8 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       
       if (walletRes.rows.length === 0) {
         walletRes = await pool.query(
-          'INSERT INTO wallets (user_id, balance) VALUES ($1, $2) RETURNING *',
-          [mobile, 0.00]
+          'INSERT INTO wallets (user_id, balance, vip_level) VALUES ($1, $2, $3) RETURNING *',
+          [mobile, 0.00, 0]
         );
       }
 
@@ -254,7 +255,8 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         message: 'Login successful',
         user: {
           mobile,
-          balance: walletRes.rows[0].balance
+          balance: walletRes.rows[0].balance,
+          vip_level: walletRes.rows[0].vip_level || 0
         }
       });
     } else {
@@ -263,6 +265,85 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   } catch (err) {
     console.error('Database or Verification error:', err);
     res.status(500).json({ success: false, message: 'Internal server error' });
+  }
+});
+
+// --- 3. ADMIN DEPOSIT APPROVAL ROUTE (VIP1 UNLOCKER) ---
+app.post('/api/admin/approve-deposit', async (req, res) => {
+  const { userId, amount } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const updateRes = await client.query(
+      `INSERT INTO wallets (user_id, balance, vip_level) 
+       VALUES ($1, $2, 1) 
+       ON CONFLICT (user_id) 
+       DO UPDATE SET balance = wallets.balance + $2, vip_level = 1, updated_at = NOW() 
+       RETURNING balance, vip_level`,
+      [userId, amount]
+    );
+
+    await client.query(
+      `INSERT INTO transactions (user_id, amount, type, status) VALUES ($1, $2, 'DEPOSIT', 'SUCCESS')`,
+      [userId, amount]
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: 'Deposit approved & VIP1 unlocked!', balance: updateRes.rows[0].balance });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Deposit approval error:', err);
+    res.status(500).json({ success: false, message: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
+// --- 4. WITHDRAWAL ROUTE (VIP CHECK) ---
+app.post('/api/wallet/withdraw', async (req, res) => {
+  const { userId, amount } = req.body;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const walletRes = await client.query(
+      'SELECT balance, vip_level FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [userId]
+    );
+
+    if (walletRes.rows.length === 0) {
+      throw new Error('Wallet not found');
+    }
+
+    const { balance, vip_level } = walletRes.rows[0];
+
+    // Check if user has VIP 1 or higher
+    if ((vip_level || 0) < 1) {
+      throw new Error('PEHLE VIP1 DEPOSIT KARO FIR WITHDRAWAL HOGA!');
+    }
+
+    if (parseFloat(balance) < parseFloat(amount)) {
+      throw new Error('Insufficient balance');
+    }
+
+    await client.query(
+      'UPDATE wallets SET balance = balance - $1, updated_at = NOW() WHERE user_id = $2',
+      [amount, userId]
+    );
+
+    await client.query(
+      `INSERT INTO transactions (user_id, amount, type, status) VALUES ($1, $2, 'WITHDRAW', 'PENDING')`,
+      [userId, amount]
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: 'Withdrawal request submitted successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(400).json({ success: false, message: err.message });
+  } finally {
+    client.release();
   }
 });
 
