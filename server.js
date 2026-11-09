@@ -24,6 +24,15 @@ const io = new Server(server, { cors: { origin: process.env.FRONTEND_URL || 'htt
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`).catch(()=>{});
 pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`).catch(()=>{});
+app.get('/fix-db', async (req, res) => {
+  try {
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`);
+    res.send('HO GAYA! Column ban gaya!');
+  } catch (e) {
+    res.send('ERROR: ' + e.message);
+  }
+});
 // ===== TERA UPI + QR SETTING - NEW ADDED =====
 const MY_UPI_ID = "ombk.aahi70694v2ydnslbfb@mbk";
 const MY_UPI_NAME = "Aahi";
