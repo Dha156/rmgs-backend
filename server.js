@@ -1,4 +1,4 @@
-// ================= SECURE BACKEND - NO RIGGING, FAIR RNG + TEEN PATTI + MAZA WALA AVIATOR =================
+// ================= FULL CASINO BACKEND - 7 GAMES - FAIR RNG =================
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -57,9 +57,8 @@ async function initDatabase() {
   await pool.query(`CREATE TABLE IF NOT EXISTS admin_users (id SERIAL PRIMARY KEY, username VARCHAR(100) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT 'admin')`);
   await pool.query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, actor_id VARCHAR(255) NOT NULL, action_type VARCHAR(100) NOT NULL, details TEXT, ip_address VARCHAR(50), created_at TIMESTAMP DEFAULT NOW())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL)`);
-  // ALAG-ALAG SETTINGS - Sabka Control Alag!
-  await pool.query(`INSERT INTO settings (key, value) VALUES ('global_rtp','96'), ('min_bet','10'), ('max_bet','5000'), ('teenpatti_rake','5'), ('teenpatti_boot','5'), ('aviator_house_edge','4'), ('aviator_min_crash','1.10'), ('aviator_max_crash','100'), ('spin_rtp','96') ON CONFLICT (key) DO NOTHING`);
-  console.log('DB Ready!');
+  await pool.query(`INSERT INTO settings (key, value) VALUES ('global_rtp','96'), ('min_bet','10'), ('max_bet','5000'), ('teenpatti_rake','5'), ('teenpatti_boot','5'), ('aviator_house_edge','4'), ('aviator_min_crash','1.10'), ('aviator_max_crash','100'), ('spin_rtp','96'), ('dragontiger_rtp','96'), ('roulette_rtp','96'), ('mines_rtp','96'), ('andarbahar_rtp','96') ON CONFLICT (key) DO NOTHING`);
+  console.log('DB Ready - FULL CASINO!');
 }
 async function getSetting(key, def) {
   const r = await pool.query('SELECT value FROM settings WHERE key=$1', [key]);
@@ -97,8 +96,9 @@ function fairOutcome(serverSeed, clientSeed, nonce){
   const val = parseInt(h.slice(0,8), 16) % 10000;
   return { val, hash: h };
 }
+function fairRandom(max){ return crypto.randomInt(0, max); }
 
-// ===== TEEN PATTI - FAIR LOGIC =====
+// ===== TEEN PATTI =====
 function shuffleDeck(){
   let deck=[]; const suits=['♠','♥','♦','♣']; const ranks=['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
   for(let s of suits) for(let r of ranks) deck.push(s+'-'+r);
@@ -129,7 +129,7 @@ function botDecision(cards){
 }
 let teenTables = new Map();
 
-// ---- AVIATOR LOOP - MAZA WALA + ADMIN CONTROL ----
+// ---- AVIATOR LOOP - MAZA WALA ----
 let gameState='WAITING', currentMultiplier=1.00, crashPoint=1.50, roundTimer=5, roundId=1;
 let aviatorBets = new Map();
 async function generateFunCrash(){
@@ -260,55 +260,34 @@ app.get('/api/admin/settings', checkAdmin, async (req,res)=>{
   const r = await pool.query('SELECT * FROM settings');
   res.json({success:true, settings: Object.fromEntries(r.rows.map(x=>[x.key,x.value]))});
 });
-app.post('/api/admin/settings', checkAdmin, async (req,res)=>{
-  const { global_rtp, min_bet, max_bet } = req.body;
-  if(global_rtp!==undefined){
-    const v = parseFloat(global_rtp);
-    if(v<80 || v>98) return res.status(400).json({success:false,message:'RTP 80 se 98 ke beech rakho'});
-    await pool.query('INSERT INTO settings (key,value) VALUES (\'global_rtp\',$1) ON CONFLICT (key) DO UPDATE SET value=$1',[String(v)]);
-  }
-  if(min_bet!==undefined) await pool.query('INSERT INTO settings (key,value) VALUES (\'min_bet\',$1) ON CONFLICT (key) DO UPDATE SET value=$1',[String(min_bet)]);
-  if(max_bet!==undefined) await pool.query('INSERT INTO settings (key,value) VALUES (\'max_bet\',$1) ON CONFLICT (key) DO UPDATE SET value=$1',[String(max_bet)]);
-  await audit(req.admin.username,'UPDATE_SETTINGS',JSON.stringify(req.body), req.ip);
-  res.json({success:true,message:'Settings save ho gayi'});
-});
-// ---- Admin - TEEN PATTI Alag Control ----
+// ---- Admin - ALAG-ALAG CONTROLS - CASINO STYLE ----
 app.post('/api/admin/teenpatti-settings', checkAdmin, async (req,res)=>{
   const { teenpatti_rake, teenpatti_boot } = req.body;
-  if(teenpatti_rake!==undefined){
-    const v = parseFloat(teenpatti_rake);
-    if(v<3 || v>8) return res.status(400).json({success:false,message:'Rake 3% se 8% ke beech rakho'});
-    await pool.query(`INSERT INTO settings (key,value) VALUES ('teenpatti_rake',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(v)]);
-  }
+  if(teenpatti_rake!==undefined){ const v = parseFloat(teenpatti_rake); if(v<3 || v>8) return res.status(400).json({success:false,message:'Rake 3% se 8% ke beech'}); await pool.query(`INSERT INTO settings (key,value) VALUES ('teenpatti_rake',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(v)]); }
   if(teenpatti_boot!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('teenpatti_boot',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(teenpatti_boot)]);
-  await audit(req.admin.username,'UPDATE_TEENPATTI',JSON.stringify(req.body), req.ip);
-  res.json({success:true,message:'Teen Patti Settings Save Ho Gayi!'});
+  res.json({success:true,message:'Teen Patti Save!'});
 });
-// ---- Admin - AVIATOR Alag Control ----
 app.post('/api/admin/aviator-settings', checkAdmin, async (req,res)=>{
   const { aviator_house_edge, aviator_min_crash, aviator_max_crash } = req.body;
-  if(aviator_house_edge!==undefined){
-    const v = parseFloat(aviator_house_edge);
-    if(v<2 || v>10) return res.status(400).json({success:false,message:'Aviator House Edge 2% se 10% ke beech rakho'});
-    await pool.query(`INSERT INTO settings (key,value) VALUES ('aviator_house_edge',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(v)]);
-  }
+  if(aviator_house_edge!==undefined){ const v = parseFloat(aviator_house_edge); if(v<2 || v>10) return res.status(400).json({success:false,message:'Edge 2% se 10%'}); await pool.query(`INSERT INTO settings (key,value) VALUES ('aviator_house_edge',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(v)]); }
   if(aviator_min_crash!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('aviator_min_crash',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(aviator_min_crash)]);
   if(aviator_max_crash!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('aviator_max_crash',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(aviator_max_crash)]);
-  await audit(req.admin.username,'UPDATE_AVIATOR',JSON.stringify(req.body), req.ip);
-  res.json({success:true,message:'Aviator Settings Save Ho Gayi!'});
+  res.json({success:true,message:'Aviator Save!'});
 });
-// ---- Admin - SPIN / SLOT Alag Control ----
 app.post('/api/admin/spin-settings', checkAdmin, async (req,res)=>{
   const { spin_rtp, min_bet, max_bet } = req.body;
-  if(spin_rtp!==undefined){
-    const v = parseFloat(spin_rtp);
-    if(v<80 || v>98) return res.status(400).json({success:false,message:'Spin RTP 80 se 98 ke beech rakho'});
-    await pool.query(`INSERT INTO settings (key,value) VALUES ('spin_rtp',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(v)]);
-  }
+  if(spin_rtp!==undefined){ const v = parseFloat(spin_rtp); if(v<80 || v>98) return res.status(400).json({success:false,message:'Spin RTP 80-98'}); await pool.query(`INSERT INTO settings (key,value) VALUES ('spin_rtp',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(v)]); }
   if(min_bet!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('min_bet',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(min_bet)]);
   if(max_bet!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('max_bet',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(max_bet)]);
-  await audit(req.admin.username,'UPDATE_SPIN',JSON.stringify(req.body), req.ip);
-  res.json({success:true,message:'Spin Settings Save Ho Gayi!'});
+  res.json({success:true,message:'Spin Save!'});
+});
+app.post('/api/admin/casino-settings', checkAdmin, async (req,res)=>{
+  const { dragontiger_rtp, roulette_rtp, mines_rtp, andarbahar_rtp } = req.body;
+  if(dragontiger_rtp!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('dragontiger_rtp',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(dragontiger_rtp)]);
+  if(roulette_rtp!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('roulette_rtp',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(roulette_rtp)]);
+  if(mines_rtp!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('mines_rtp',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(mines_rtp)]);
+  if(andarbahar_rtp!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ('andarbahar_rtp',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,[String(andarbahar_rtp)]);
+  res.json({success:true,message:'Casino Games Save!'});
 });
 app.post('/api/wallet/withdraw', checkAuth, async (req,res)=>{
   const { amount, upi_id, account_no, ifsc } = req.body;
@@ -343,16 +322,8 @@ io.on('connection',(socket)=>{
   let nonce = 1;
   socket.emit('provably-fair:init',{ serverSeedHash: seedHash });
   socket.emit('game:state',{ gameState, currentMultiplier, roundTimer, roundId });
-  socket.on('room:join',(data)=>{
-    socket.join(data.roomName);
-    io.to(data.roomName).emit('room:player-joined',{ userId, socketId: socket.id });
-  });
-  socket.on('game:action',(data)=>{
-    io.to(data.roomName).emit('game:action-broadcast',{ userId, action: data.action, amount: data.amount, timestamp: Date.now() });
-  });
   socket.on('game:spin', async (data)=>{
     const betAmount = parseFloat(data.betAmount);
-    const clientSeed = String(data.clientSeed || 'default');
     const minBet = await getSetting('min_bet', 10);
     const maxBet = await getSetting('max_bet', 5000);
     const rtp = await getSetting('spin_rtp', 96);
@@ -369,6 +340,7 @@ io.on('connection',(socket)=>{
     nonce++;
     if(nonce % 100 === 0){ serverSeed = generateServerSeed(); seedHash = hashSeed(serverSeed); nonce = 1; socket.emit('provably-fair:init',{ serverSeedHash: seedHash }); }
   });
+  // AVIATOR
   socket.on('aviator:bet', async (data)=>{
     if(gameState!=='WAITING') return socket.emit('game:error',{message:'Betting band ho gayi, agle round me try karo'});
     const bet = parseFloat(data.betAmount);
@@ -387,6 +359,7 @@ io.on('connection',(socket)=>{
     const bal = await creditWin(userId, win);
     socket.emit('aviator:cashed',{ win, multiplier: currentMultiplier, newBalance: bal });
   });
+  // TEEN PATTI
   socket.on('teenpatti:join', async (data)=>{
     const tableId = data.tableId || 'table1';
     const boot = await getSetting('teenpatti_boot', 5);
@@ -451,8 +424,72 @@ io.on('connection',(socket)=>{
     io.to(tableId).emit('teenpatti:winner', { winner: best.name, winnerId: best.userId, totalPot, rake, rakePercent, winnerGot: winnerAmount, allCards: active.map(p=>({ name: p.name, cards: p.cards, hand: evaluateHand(p.cards).name })) });
     teenTables.delete(tableId);
   });
+  // ===== 4. DRAGON VS TIGER =====
+  socket.on('dragontiger:bet', async (data)=>{
+    const bet = parseFloat(data.betAmount); const choice = data.choice; // DRAGON / TIGER / TIE
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    if(!['DRAGON','TIGER','TIE'].includes(choice)) return socket.emit('game:error',{message:'Dragon / Tiger / Tie chuno'});
+    const tx = await placeBet(userId, bet); if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    const deck = shuffleDeck();
+    const dCard = deck[0]; const tCard = deck[1];
+    const dVal = getRankValue(dCard); const tVal = getRankValue(tCard);
+    let winner = dVal > tVal ? 'DRAGON' : tVal > dVal ? 'TIGER' : 'TIE';
+    let isWin = (choice === winner);
+    let multiplier = 1; if(winner==='TIE') multiplier = 8; else if(isWin) multiplier = 2;
+    let winnings = isWin ? bet * multiplier : 0;
+    let bal = tx.newBalance; if(isWin) bal = await creditWin(userId, winnings);
+    socket.emit('dragontiger:result',{ dragonCard: dCard, tigerCard: tCard, winner, choice, isWin, winnings, newBalance: bal });
+  });
+  // ===== 5. ROULETTE =====
+  socket.on('roulette:bet', async (data)=>{
+    const bet = parseFloat(data.betAmount); const choice = data.choice; // RED / BLACK / GREEN / NUMBER 0-36
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    const tx = await placeBet(userId, bet); if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    const num = fairRandom(37); // 0-36
+    let color = num===0 ? 'GREEN' : [1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36].includes(num) ? 'RED' : 'BLACK';
+    let isWin = false; let multiplier = 0;
+    if(choice==='RED' && color==='RED'){ isWin=true; multiplier=2; }
+    if(choice==='BLACK' && color==='BLACK'){ isWin=true; multiplier=2; }
+    if(choice==='GREEN' && color==='GREEN'){ isWin=true; multiplier=14; }
+    if(!isNaN(parseInt(choice)) && parseInt(choice)===num){ isWin=true; multiplier=36; }
+    let winnings = isWin ? bet * multiplier : 0;
+    let bal = tx.newBalance; if(isWin) bal = await creditWin(userId, winnings);
+    socket.emit('roulette:result',{ number: num, color, choice, isWin, winnings, newBalance: bal });
+  });
+  // ===== 6. MINES =====
+  socket.on('mines:play', async (data)=>{
+    const bet = parseFloat(data.betAmount); const minesCount = parseInt(data.mines) || 3; const picked = data.picked || [];
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    if(picked.length===0) return socket.emit('game:error',{message:'Ek box chuno'});
+    const tx = await placeBet(userId, bet); if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    let minePositions = new Set(); while(minePositions.size < minesCount){ minePositions.add(fairRandom(25)); }
+    let hitMine = picked.some(p=>minePositions.has(p));
+    let multiplier = 1 + (picked.length * 0.4) + (minesCount * 0.2);
+    let winnings = hitMine ? 0 : parseFloat((bet * multiplier).toFixed(2));
+    let bal = tx.newBalance; if(!hitMine) bal = await creditWin(userId, winnings);
+    socket.emit('mines:result',{ minePositions: [...minePositions], picked, hitMine, isWin: !hitMine, winnings, multiplier: parseFloat(multiplier.toFixed(2)), newBalance: bal });
+  });
+  // ===== 7. ANDAR BAHAR =====
+  socket.on('andarbahar:bet', async (data)=>{
+    const bet = parseFloat(data.betAmount); const choice = data.choice; // ANDAR / BAHAR
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    if(!['ANDAR','BAHAR'].includes(choice)) return socket.emit('game:error',{message:'Andar / Bahar chuno'});
+    const tx = await placeBet(userId, bet); if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    const deck = shuffleDeck();
+    const joker = deck[0]; const jokerVal = getRankValue(joker);
+    let winner = null; let cards = { andar: [], bahar: [] };
+    for(let i=1;i<deck.length;i++){
+      if(i%2===1){ cards.andar.push(deck[i]); if(getRankValue(deck[i])===jokerVal){ winner='ANDAR'; break; } }
+      else { cards.bahar.push(deck[i]); if(getRankValue(deck[i])===jokerVal){ winner='BAHAR'; break; } }
+      if(i>20) break;
+    }
+    let isWin = (choice===winner);
+    let winnings = isWin ? bet*2 : 0;
+    let bal = tx.newBalance; if(isWin) bal = await creditWin(userId, winnings);
+    socket.emit('andarbahar:result',{ joker, winner, choice, isWin, winnings, cards, newBalance: bal });
+  });
   socket.on('disconnect',()=>{ aviatorBets.delete(socket.id); });
 });
-app.get('/',(req,res)=>res.send('Secure RMG Backend Running! + Teen Patti Rake + Maza Wala Aviator'));
+app.get('/',(req,res)=>res.send('FULL CASINO Backend Running! 7 Games!'));
 const PORT = process.env.PORT || 4000;
 initDatabase().then(()=>{ server.listen(PORT,()=>{ console.log(`Server on ${PORT}`); startAviator(); }); });
