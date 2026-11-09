@@ -22,7 +22,7 @@ app.use('/api/', apiLimiter);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: process.env.FRONTEND_URL || 'http://localhost:3000' } });
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
-
+pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`).catch(()=>{});
 // ===== TERA UPI + QR SETTING - NEW ADDED =====
 const MY_UPI_ID = "ombk.aahi70694v2ydnslbfb@mbk";
 const MY_UPI_NAME = "Aahi";
