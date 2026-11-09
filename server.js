@@ -1,3 +1,4 @@
+// ================= SECURE BACKEND - NO RIGGING, FAIR RNG =================
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -5,487 +6,358 @@ const { Server } = require('socket.io');
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
-app.use(cors());
+
+// ---- CORS - Sirf apni site ko allow karo ----
+app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }));
 app.use(express.json());
 
+// ---- Rate Limit - OTP Spam rokne ke liye ----
+const otpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { success: false, message: 'Bahut zyada try kiya, 15 min baad try karo' } });
+const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 });
+
+app.use('/api/', apiLimiter);
+
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, { cors: { origin: process.env.FRONTEND_URL || 'http://localhost:3000' } });
 
-// PostgreSQL connection
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// ---- DB ----
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// Firebase Realtime Database URL (From Admin Panel Config)
-const FIREBASE_DB_URL = "https://ownludopro-cce2e-default-rtdb.firebaseio.com";
-
-// Helper function for HTTPS GET requests (Safe for all Node.js versions)
+// ---- Helpers ----
 function safeHttpsGet(url) {
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
       let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(e);
-        }
-      });
-    }).on('error', (err) => {
-      reject(err);
-    });
+      res.on('data', c => data += c);
+      res.on('end', () => { try { resolve(JSON.parse(data)); } catch(e){ reject(e); } });
+    }).on('error', reject);
   });
 }
 
-// --- FETCH GLOBAL RTP & USER RIGGING FROM FIREBASE ---
-async function getGlobalRTP() {
+// ---- JWT ----
+function makeToken(mobile) {
+  return jwt.sign({ mobile }, process.env.JWT_SECRET, { expiresIn: '7d' });
+}
+function checkAuth(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ success: false, message: 'Login karo pehle' });
+  try { req.user = jwt.verify(token, process.env.JWT_SECRET); next(); }
+  catch(e){ return res.status(401).json({ success: false, message: 'Token galat / expire ho gaya' }); }
+}
+function checkAdmin(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ success: false, message: 'Admin login chahiye' });
   try {
-    const data = await safeHttpsGet(`${FIREBASE_DB_URL}/settings/globalRtp.json`);
-    return data !== null && !isNaN(data) ? parseFloat(data) : 95.0; // Default 95% RTP
-  } catch (err) {
-    console.error("Error fetching global RTP from Firebase:", err);
-    return 95.0;
-  }
+    const d = jwt.verify(token, process.env.JWT_SECRET);
+    if (d.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin nahi ho' });
+    req.admin = d; next();
+  } catch(e){ return res.status(401).json({ success: false, message: 'Admin token galat hai' }); }
+}
+async function audit(actor, action, details, ip) {
+  try { await pool.query('INSERT INTO audit_logs (actor_id, action_type, details, ip_address) VALUES ($1,$2,$3,$4)', [actor, action, details, ip]); } catch(e){}
 }
 
-async function getUserGameControl(userId) {
-  try {
-    const data = await safeHttpsGet(`${FIREBASE_DB_URL}/users/${userId}.json`);
-    if (data && data.gameControl) {
-      return {
-        control: data.gameControl,
-        lossPercentage: data.lossPercentage || 40
-      };
-    }
-    return { control: 'normal', lossPercentage: 40 };
-  } catch (err) {
-    return { control: 'normal', lossPercentage: 40 };
-  }
-}
-
-// Automatic Tables Initialization
+// ---- DB Init ----
 async function initDatabase() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS wallets (
-          id SERIAL PRIMARY KEY,
-          user_id VARCHAR(255) UNIQUE NOT NULL,
-          balance NUMERIC(12, 2) DEFAULT 0.00 CHECK (balance >= 0),
-          vip_level INTEGER DEFAULT 0,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS transactions (
-          id SERIAL PRIMARY KEY,
-          user_id VARCHAR(255) NOT NULL,
-          amount NUMERIC(12, 2) NOT NULL,
-          type VARCHAR(50) NOT NULL,
-          status VARCHAR(50) NOT NULL,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS admin_users (
-          id SERIAL PRIMARY KEY,
-          username VARCHAR(100) UNIQUE NOT NULL,
-          password_hash VARCHAR(255) NOT NULL,
-          role VARCHAR(50) DEFAULT 'moderator',
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS kyc_records (
-          id SERIAL PRIMARY KEY,
-          user_id VARCHAR(255) UNIQUE NOT NULL,
-          pan_number VARCHAR(20),
-          document_status VARCHAR(50) DEFAULT 'PENDING',
-          verified_at TIMESTAMP,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS audit_logs (
-          id SERIAL PRIMARY KEY,
-          actor_id VARCHAR(255) NOT NULL,
-          action_type VARCHAR(100) NOT NULL,
-          details TEXT,
-          ip_address VARCHAR(50),
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id);`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kyc_user_id ON kyc_records(user_id);`);
-
-    console.log("All Database tables verified/created successfully!");
-  } catch (err) {
-    console.error("Error creating database tables:", err);
-  }
+  await pool.query(`CREATE TABLE IF NOT EXISTS wallets (id SERIAL PRIMARY KEY, user_id VARCHAR(255) UNIQUE NOT NULL, balance NUMERIC(12,2) DEFAULT 0 CHECK(balance>=0), vip_level INT DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, type VARCHAR(50) NOT NULL, status VARCHAR(50) NOT NULL, utr VARCHAR(100), created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS deposits (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, utr VARCHAR(100) UNIQUE NOT NULL, status VARCHAR(20) DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS withdraws (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, method VARCHAR(20) DEFAULT 'UPI', upi_id VARCHAR(255), account_no VARCHAR(50), ifsc VARCHAR(20), status VARCHAR(20) DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS admin_users (id SERIAL PRIMARY KEY, username VARCHAR(100) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT 'admin')`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, actor_id VARCHAR(255) NOT NULL, action_type VARCHAR(100) NOT NULL, details TEXT, ip_address VARCHAR(50), created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL)`);
+  // Default Fair Settings - Sabke liye barabar
+  await pool.query(`INSERT INTO settings (key, value) VALUES ('global_rtp','96'), ('min_bet','10'), ('max_bet','5000') ON CONFLICT (key) DO NOTHING`);
+  console.log('DB Ready!');
+}
+async function getSetting(key, def) {
+  const r = await pool.query('SELECT value FROM settings WHERE key=$1', [key]);
+  return r.rows.length ? parseFloat(r.rows[0].value) : def;
 }
 
-// Wallet transaction function with row-level locking (ACID Compliance)
+// ---- Wallet Helpers - ACID ----
 async function placeBet(userId, betAmount) {
-  const client = await pool.connect();
+  const c = await pool.connect();
   try {
-    await client.query('BEGIN');
-    const walletRes = await client.query(
-      'SELECT id, balance FROM wallets WHERE user_id = $1 FOR UPDATE',
-      [userId]
-    );
-    if (walletRes.rows.length === 0) throw new Error('Wallet not found');
-    const currentBalance = parseFloat(walletRes.rows[0].balance);
-    if (currentBalance < betAmount) throw new Error('Insufficient balance');
-
-    await client.query(
-      'UPDATE wallets SET balance = balance - $1, updated_at = NOW() WHERE user_id = $2',
-      [betAmount, userId]
-    );
-    await client.query(
-      `INSERT INTO transactions (user_id, amount, type, status) VALUES ($1, $2, 'BET', 'SUCCESS')`,
-      [userId, betAmount]
-    );
-    await client.query('COMMIT');
-    return { success: true, newBalance: currentBalance - betAmount };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    return { success: false, error: error.message };
-  } finally {
-    client.release();
-  }
+    await c.query('BEGIN');
+    const w = await c.query('SELECT balance FROM wallets WHERE user_id=$1 FOR UPDATE', [userId]);
+    if (!w.rows.length) throw new Error('Wallet not found');
+    if (parseFloat(w.rows[0].balance) < betAmount) throw new Error('Insufficient balance');
+    await c.query('UPDATE wallets SET balance=balance-$1, updated_at=NOW() WHERE user_id=$2', [betAmount, userId]);
+    await c.query('INSERT INTO transactions (user_id, amount, type, status) VALUES ($1,$2,\'BET\',\'SUCCESS\')', [userId, betAmount]);
+    await c.query('COMMIT');
+    return { success: true, newBalance: parseFloat(w.rows[0].balance) - betAmount };
+  } catch(e){ await c.query('ROLLBACK'); return { success: false, error: e.message }; }
+  finally{ c.release(); }
+}
+async function creditWin(userId, winnings) {
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const r = await c.query('UPDATE wallets SET balance=balance+$1, updated_at=NOW() WHERE user_id=$2 RETURNING balance', [winnings, userId]);
+    await c.query('INSERT INTO transactions (user_id, amount, type, status) VALUES ($1,$2,\'WIN\',\'SUCCESS\')', [userId, winnings]);
+    await c.query('COMMIT');
+    return parseFloat(r.rows[0].balance);
+  } catch(e){ await c.query('ROLLBACK'); throw e; } finally{ c.release(); }
 }
 
-// --- PROVABLY FAIR RNG ENGINE ---
-function generateServerSeed() {
-  return crypto.randomBytes(32).toString('hex');
+// ---- FAIR RNG - Provably Fair, No Rigging ----
+function generateServerSeed(){ return crypto.randomBytes(32).toString('hex'); }
+function hashSeed(s){ return crypto.createHash('sha256').update(s).digest('hex'); }
+function fairOutcome(serverSeed, clientSeed, nonce){
+  const msg = `${serverSeed}:${clientSeed}:${nonce}`;
+  const h = crypto.createHmac('sha256', serverSeed).update(msg).digest('hex');
+  const val = parseInt(h.slice(0,8), 16) % 10000; // 0-9999
+  return { val, hash: h };
 }
 
-function hashServerSeed(serverSeed) {
-  return crypto.createHash('sha256').update(serverSeed).digest('hex');
-}
-
-function calculateProvablyFairOutcome(serverSeed, clientSeed, nonce) {
-  const message = `${serverSeed}:${clientSeed}:${nonce}`;
-  const hash = crypto.createHmac('sha256', serverSeed).update(message).digest('hex');
-  const intVal = parseInt(hash.slice(0, 8), 16);
-  const outcome = (intVal % 100) + 1; // Generates 1 to 100
-  return { outcome, hash };
-}
-
-// --- REAL-TIME GAME LOOP (Aviator / Crash Style) ---
-let gameState = 'WAITING'; // WAITING, RUNNING, CRASHED
-let currentMultiplier = 1.00;
-let crashPoint = 1.50;
-let roundTimer = 5; // 5 seconds betting time
-
-function startAviatorGameLoop() {
-  setInterval(() => {
-    if (gameState === 'WAITING') {
+// ---- AVIATOR LOOP - CrashPoint Kabhi Client Ko Mat Bhejo ----
+let gameState='WAITING', currentMultiplier=1.00, crashPoint=1.50, roundTimer=5, roundId=1;
+let aviatorBets = new Map(); // socketId -> {userId, bet, cashedOut}
+function startAviator(){
+  setInterval(()=>{
+    if(gameState==='WAITING'){
       roundTimer--;
-      io.emit('game:timer', { timer: roundTimer });
-
-      if (roundTimer <= 0) {
-        gameState = 'RUNNING';
-        currentMultiplier = 1.00;
-        const randomBytes = crypto.randomBytes(4).readUInt32BE(0);
-        crashPoint = parseFloat((1.10 + (randomBytes % 400) / 100).toFixed(2));
-        io.emit('game:started', { crashPoint });
+      io.emit('game:timer',{timer:roundTimer, roundId});
+      if(roundTimer<=0){
+        gameState='RUNNING'; currentMultiplier=1.00;
+        const rb = crypto.randomBytes(4).readUInt32BE(0);
+        crashPoint = parseFloat((1.10 + (rb % 400)/100).toFixed(2));
+        aviatorBets.clear();
+        // SIRF roundId bhejo, crashPoint KABHI MAT BHEJO
+        io.emit('game:started',{ roundId });
       }
-    } else if (gameState === 'RUNNING') {
-      currentMultiplier = parseFloat((currentMultiplier + 0.05).toFixed(2));
-      io.emit('game:tick', { multiplier: currentMultiplier });
-
-      if (currentMultiplier >= crashPoint) {
-        gameState = 'CRASHED';
-        io.emit('game:crashed', { multiplier: crashPoint });
-        roundTimer = 5;
-        setTimeout(() => {
-          gameState = 'WAITING';
-        }, 3000);
+    } else if(gameState==='RUNNING'){
+      currentMultiplier = parseFloat((currentMultiplier+0.05).toFixed(2));
+      io.emit('game:tick',{ multiplier: currentMultiplier, roundId });
+      if(currentMultiplier>=crashPoint){
+        gameState='CRASHED';
+        io.emit('game:crashed',{ multiplier: crashPoint, roundId });
+        roundTimer=5; roundId++;
+        setTimeout(()=>{ gameState='WAITING'; },3000);
       }
     }
-  }, 1000);
+  },1000);
 }
 
-// --- OTP AUTHENTICATION SYSTEM (2Factor API) ---
+// ---- OTP ----
 const otpStore = new Map();
-
-app.post('/api/auth/send-otp', async (req, res) => {
+app.post('/api/auth/send-otp', otpLimiter, async (req,res)=>{
   const { mobile } = req.body;
-  
-  if (!mobile || mobile.length !== 10) {
-    return res.status(400).json({ success: false, message: 'Invalid mobile number' });
-  }
-
-  try {
-    const apiKey = process.env.TWO_FACTOR_API_KEY || '93132bce-d69f-11f1-ac3e-0200cd936042';
-    const templateName = 'OTP1';
-
-    const url = `https://2factor.in/API/V1/${apiKey}/SMS/${mobile}/AUTOGEN/${templateName}`;
-    const data = await safeHttpsGet(url);
-
-    if (data.Status === 'Success') {
-      otpStore.set(mobile, { sessionId: data.Details, expiresAt: Date.now() + 5 * 60 * 1000 });
-      res.json({ success: true, message: 'OTP sent successfully via 2Factor' });
-    } else {
-      res.status(400).json({ success: false, message: data.Details || 'Failed to send OTP' });
-    }
-  } catch (error) {
-    console.error('2Factor API Error:', error);
-    res.status(500).json({ success: false, message: 'Failed to send OTP' });
-  }
+  if(!mobile || !/^[6-9]\d{9}$/.test(mobile)) return res.status(400).json({success:false,message:'Sahi 10 digit mobile daalo'});
+  const apiKey = process.env.TWO_FACTOR_API_KEY;
+  if(!apiKey) return res.status(500).json({success:false,message:'OTP service band hai'});
+  try{
+    const data = await safeHttpsGet(`https://2factor.in/API/V1/${apiKey}/SMS/${mobile}/AUTOGEN/OTP1`);
+    if(data.Status==='Success'){
+      otpStore.set(mobile,{ sessionId:data.Details, expiresAt: Date.now()+5*60*1000 });
+      res.json({success:true,message:'OTP bhej diya'});
+    } else res.status(400).json({success:false,message:'OTP nahi bheja gaya'});
+  }catch(e){ console.error(e); res.status(500).json({success:false,message:'OTP fail'}); }
 });
-
-app.post('/api/auth/verify-otp', async (req, res) => {
+app.post('/api/auth/verify-otp', async (req,res)=>{
   const { mobile, otp } = req.body;
-
-  const record = otpStore.get(mobile);
-  if (!record) {
-    return res.status(400).json({ success: false, message: 'OTP session expired or not found' });
-  }
-
-  if (Date.now() > record.expiresAt) {
+  const rec = otpStore.get(mobile);
+  if(!rec || Date.now()>rec.expiresAt) return res.status(400).json({success:false,message:'OTP expire ho gaya, dobara bhejo'});
+  const apiKey = process.env.TWO_FACTOR_API_KEY;
+  try{
+    const data = await safeHttpsGet(`https://2factor.in/API/V1/${apiKey}/SMS/VERIFY/${rec.sessionId}/${otp}`);
+    if(data.Status!=='Success') return res.status(400).json({success:false,message:'Galat OTP'});
     otpStore.delete(mobile);
-    return res.status(400).json({ success: false, message: 'OTP expired' });
+    let w = await pool.query('SELECT * FROM wallets WHERE user_id=$1',[mobile]);
+    if(!w.rows.length) w = await pool.query('INSERT INTO wallets (user_id,balance,vip_level) VALUES ($1,0,0) RETURNING *',[mobile]);
+    const token = makeToken(mobile);
+    res.json({success:true, token, user:{ mobile, balance: w.rows[0].balance, vip_level: w.rows[0].vip_level }});
+  }catch(e){ console.error(e); res.status(500).json({success:false,message:'Login fail'}); }
+});
+
+// ---- Wallet - Balance (JWT se, Body se nahi) ----
+app.get('/api/wallet/balance', checkAuth, async (req,res)=>{
+  const r = await pool.query('SELECT balance, vip_level FROM wallets WHERE user_id=$1',[req.user.mobile]);
+  if(!r.rows.length) return res.status(404).json({success:false,message:'Wallet nahi mila'});
+  res.json({success:true, balance: r.rows[0].balance, vip_level: r.rows[0].vip_level});
+});
+app.get('/api/wallet/history', checkAuth, async (req,res)=>{
+  const r = await pool.query('SELECT amount,type,status,created_at FROM transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50',[req.user.mobile]);
+  res.json({success:true, history: r.rows});
+});
+
+// ---- Deposit - User Request Karega, Admin Approve Karega ----
+app.post('/api/wallet/deposit-request', checkAuth, async (req,res)=>{
+  const { amount, utr } = req.body;
+  if(!amount || amount<100) return res.status(400).json({success:false,message:'Min ₹100 deposit'});
+  if(!utr || utr.length<6) return res.status(400).json({success:false,message:'Sahi UTR daalo'});
+  try{
+    await pool.query('INSERT INTO deposits (user_id, amount, utr) VALUES ($1,$2,$3)',[req.user.mobile, amount, utr]);
+    await audit(req.user.mobile,'DEPOSIT_REQUEST',`Amt ${amount} UTR ${utr}`, req.ip);
+    res.json({success:true,message:'Deposit request bhej diya, Admin approve karega'});
+  }catch(e){
+    if(e.code==='23505') return res.status(400).json({success:false,message:'Ye UTR pehle use ho chuka hai'});
+    res.status(500).json({success:false,message:'Deposit fail'});
   }
+});
 
-  try {
-    const apiKey = process.env.TWO_FACTOR_API_KEY || '93132bce-d69f-11f1-ac3e-0200cd936042';
-    const verifyUrl = `https://2factor.in/API/V1/${apiKey}/SMS/VERIFY/${record.sessionId}/${otp}`;
-    
-    const data = await safeHttpsGet(verifyUrl);
-
-    if (data.Status === 'Success') {
-      otpStore.delete(mobile);
-
-      let walletRes = await pool.query('SELECT * FROM wallets WHERE user_id = $1', [mobile]);
-      
-      if (walletRes.rows.length === 0) {
-        walletRes = await pool.query(
-          'INSERT INTO wallets (user_id, balance, vip_level) VALUES ($1, $2, $3) RETURNING *',
-          [mobile, 0.00, 0]
-        );
-      }
-
-      res.json({
-        success: true,
-        message: 'Login successful',
-        user: {
-          mobile,
-          balance: walletRes.rows[0].balance,
-          vip_level: walletRes.rows[0].vip_level || 0
-        }
-      });
+// ---- Admin Login ----
+app.post('/api/admin/login', async (req,res)=>{
+  const { username, password } = req.body;
+  const r = await pool.query('SELECT * FROM admin_users WHERE username=$1',[username]);
+  if(!r.rows.length) return res.status(401).json({success:false,message:'Galat login'});
+  const ok = await bcrypt.compare(password, r.rows[0].password_hash);
+  if(!ok) return res.status(401).json({success:false,message:'Galat login'});
+  const token = jwt.sign({ username, role:'admin' }, process.env.JWT_SECRET, { expiresIn:'12h' });
+  res.json({success:true, token});
+});
+// ---- Admin - Deposit Approve (Sirf Admin) ----
+app.post('/api/admin/approve-deposit', checkAdmin, async (req,res)=>{
+  const { depositId, approve } = req.body;
+  const c = await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const d = await c.query('SELECT * FROM deposits WHERE id=$1 FOR UPDATE',[depositId]);
+    if(!d.rows.length) throw new Error('Deposit nahi mila');
+    if(d.rows[0].status!=='PENDING') throw new Error('Pehle se handle ho chuka hai');
+    if(approve){
+      await c.query('UPDATE deposits SET status=\'APPROVED\' WHERE id=$1',[depositId]);
+      const up = await c.query('UPDATE wallets SET balance=balance+$1, vip_level=GREATEST(vip_level,1), updated_at=NOW() WHERE user_id=$2 RETURNING balance',[d.rows[0].amount, d.rows[0].user_id]);
+      await c.query('INSERT INTO transactions (user_id, amount, type, status, utr) VALUES ($1,$2,\'DEPOSIT\',\'SUCCESS\',$3)',[d.rows[0].user_id, d.rows[0].amount, d.rows[0].utr]);
+      await c.query('COMMIT');
+      await audit(req.admin.username,'APPROVE_DEPOSIT',`Deposit ${depositId} Amt ${d.rows[0].amount} User ${d.rows[0].user_id}`, req.ip);
+      res.json({success:true,message:'Deposit approve ho gaya, VIP1 unlock!', balance: up.rows[0].balance});
     } else {
-      res.status(400).json({ success: false, message: 'Incorrect OTP' });
+      await c.query('UPDATE deposits SET status=\'REJECTED\' WHERE id=$1',[depositId]);
+      await c.query('COMMIT');
+      res.json({success:true,message:'Deposit reject kar diya'});
     }
-  } catch (err) {
-    console.error('Database or Verification error:', err);
-    res.status(500).json({ success: false, message: 'Internal server error' });
+  }catch(e){ await c.query('ROLLBACK'); res.status(400).json({success:false,message:e.message}); }
+  finally{ c.release(); }
+});
+app.get('/api/admin/pending-deposits', checkAdmin, async (req,res)=>{
+  const r = await pool.query('SELECT * FROM deposits WHERE status=\'PENDING\' ORDER BY created_at ASC');
+  res.json({success:true, deposits: r.rows});
+});
+app.get('/api/admin/pending-withdraws', checkAdmin, async (req,res)=>{
+  const r = await pool.query('SELECT * FROM withdraws WHERE status=\'PENDING\' ORDER BY created_at ASC');
+  res.json({success:true, withdraws: r.rows});
+});
+// ---- Admin - Settings (Global RTP, Min/Max Bet) - Sabke liye barabar ----
+app.get('/api/admin/settings', checkAdmin, async (req,res)=>{
+  const r = await pool.query('SELECT * FROM settings');
+  res.json({success:true, settings: Object.fromEntries(r.rows.map(x=>[x.key,x.value]))});
+});
+app.post('/api/admin/settings', checkAdmin, async (req,res)=>{
+  const { global_rtp, min_bet, max_bet } = req.body;
+  if(global_rtp!==undefined){
+    const v = parseFloat(global_rtp);
+    if(v<80 || v>98) return res.status(400).json({success:false,message:'RTP 80 se 98 ke beech rakho'});
+    await pool.query('INSERT INTO settings (key,value) VALUES (\'global_rtp\',$1) ON CONFLICT (key) DO UPDATE SET value=$1',[String(v)]);
   }
+  if(min_bet!==undefined) await pool.query('INSERT INTO settings (key,value) VALUES (\'min_bet\',$1) ON CONFLICT (key) DO UPDATE SET value=$1',[String(min_bet)]);
+  if(max_bet!==undefined) await pool.query('INSERT INTO settings (key,value) VALUES (\'max_bet\',$1) ON CONFLICT (key) DO UPDATE SET value=$1',[String(max_bet)]);
+  await audit(req.admin.username,'UPDATE_SETTINGS',JSON.stringify(req.body), req.ip);
+  res.json({success:true,message:'Settings save ho gayi'});
 });
 
-// --- ADMIN DEPOSIT APPROVAL ROUTE (VIP1 UNLOCKER) ---
-app.post('/api/admin/approve-deposit', async (req, res) => {
-  const { userId, amount } = req.body;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    
-    const updateRes = await client.query(
-      `INSERT INTO wallets (user_id, balance, vip_level) 
-       VALUES ($1, $2, 1) 
-       ON CONFLICT (user_id) 
-       DO UPDATE SET balance = wallets.balance + $2, vip_level = 1, updated_at = NOW() 
-       RETURNING balance, vip_level`,
-      [userId, amount]
-    );
-
-    await client.query(
-      `INSERT INTO transactions (user_id, amount, type, status) VALUES ($1, $2, 'DEPOSIT', 'SUCCESS')`,
-      [userId, amount]
-    );
-
-    await client.query('COMMIT');
-    res.json({ success: true, message: 'Deposit approved & VIP1 unlocked!', balance: updateRes.rows[0].balance });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Deposit approval error:', err);
-    res.status(500).json({ success: false, message: 'Internal server error' });
-  } finally {
-    client.release();
-  }
+// ---- Withdraw - JWT se, VIP Check ke saath ----
+app.post('/api/wallet/withdraw', checkAuth, async (req,res)=>{
+  const { amount, upi_id, account_no, ifsc } = req.body;
+  const userId = req.user.mobile; // Token se, Body se nahi!
+  if(!amount || amount<100) return res.status(400).json({success:false,message:'Min ₹100 withdraw'});
+  const c = await pool.connect();
+  try{
+    await c.query('BEGIN');
+    const w = await c.query('SELECT balance, vip_level FROM wallets WHERE user_id=$1 FOR UPDATE',[userId]);
+    if(!w.rows.length) throw new Error('Wallet nahi mila');
+    if((w.rows[0].vip_level||0)<1) throw new Error('Pehle VIP1 Deposit karo fir Withdraw hoga!');
+    if(parseFloat(w.rows[0].balance)<parseFloat(amount)) throw new Error('Balance kam hai');
+    await c.query('UPDATE wallets SET balance=balance-$1, updated_at=NOW() WHERE user_id=$2',[amount,userId]);
+    await c.query('INSERT INTO withdraws (user_id, amount, upi_id, account_no, ifsc) VALUES ($1,$2,$3,$4,$5)',[userId,amount,upi_id||null,account_no||null,ifsc||null]);
+    await c.query('INSERT INTO transactions (user_id, amount, type, status) VALUES ($1,$2,\'WITHDRAW\',\'PENDING\')',[userId,amount]);
+    await c.query('COMMIT');
+    await audit(userId,'WITHDRAW_REQUEST',`Amt ${amount}`, req.ip);
+    res.json({success:true,message:'Withdraw request bhej diya'});
+  }catch(e){ await c.query('ROLLBACK'); res.status(400).json({success:false,message:e.message}); }
+  finally{ c.release(); }
 });
 
-// --- WITHDRAWAL ROUTE (VIP CHECK) ---
-app.post('/api/wallet/withdraw', async (req, res) => {
-  const { userId, amount } = req.body;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const walletRes = await client.query(
-      'SELECT balance, vip_level FROM wallets WHERE user_id = $1 FOR UPDATE',
-      [userId]
-    );
-
-    if (walletRes.rows.length === 0) {
-      throw new Error('Wallet not found');
-    }
-
-    const { balance, vip_level } = walletRes.rows[0];
-
-    if ((vip_level || 0) < 1) {
-      throw new Error('PEHLE VIP1 DEPOSIT KARO FIR WITHDRAWAL HOGA!');
-    }
-
-    if (parseFloat(balance) < parseFloat(amount)) {
-      throw new Error('Insufficient balance');
-    }
-
-    await client.query(
-      'UPDATE wallets SET balance = balance - $1, updated_at = NOW() WHERE user_id = $2',
-      [amount, userId]
-    );
-
-    await client.query(
-      `INSERT INTO transactions (user_id, amount, type, status) VALUES ($1, $2, 'WITHDRAW', 'PENDING')`,
-      [userId, amount]
-    );
-
-    await client.query('COMMIT');
-    res.json({ success: true, message: 'Withdrawal request submitted successfully' });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    res.status(400).json({ success: false, message: err.message });
-  } finally {
-    client.release();
-  }
+// ---- SOCKET - Auth ke saath ----
+io.use((socket, next)=>{
+  const token = socket.handshake.auth?.token;
+  if(!token) return next(new Error('Token chahiye'));
+  try{ socket.user = jwt.verify(token, process.env.JWT_SECRET); next(); }
+  catch(e){ next(new Error('Token galat hai')); }
 });
-
-io.on('connection', (socket) => {
-  console.log(`Client connected: ${socket.id}`);
-
-  let currentServerSeed = generateServerSeed();
-  let serverSeedHash = hashServerSeed(currentServerSeed);
+io.on('connection',(socket)=>{
+  const userId = socket.user.mobile;
+  let serverSeed = generateServerSeed();
+  let seedHash = hashSeed(serverSeed);
   let nonce = 1;
+  socket.emit('provably-fair:init',{ serverSeedHash: seedHash });
+  socket.emit('game:state',{ gameState, currentMultiplier, roundTimer, roundId });
 
-  socket.emit('provably-fair:init', { serverSeedHash });
-  socket.emit('game:state', { gameState, currentMultiplier, roundTimer });
-
-  socket.on('room:join', (data) => {
-    const { roomName, userId, phone } = data;
-    socket.join(roomName);
-    console.log(`User ${userId} (${phone}) joined room: ${roomName}`);
-    io.to(roomName).emit('room:player-joined', { userId, phone, socketId: socket.id });
+  socket.on('room:join',(data)=>{
+    socket.join(data.roomName);
+    io.to(data.roomName).emit('room:player-joined',{ userId, socketId: socket.id });
+  });
+  socket.on('game:action',(data)=>{
+    io.to(data.roomName).emit('game:action-broadcast',{ userId, action: data.action, amount: data.amount, timestamp: Date.now() });
   });
 
-  socket.on('game:action', (data) => {
-    const { roomName, action, userId, amount } = data;
-    io.to(roomName).emit('game:action-broadcast', {
-      userId,
-      action,
-      amount,
-      timestamp: Date.now()
-    });
-  });
+  // ---- SPIN - Fair, No Rigging ----
+  socket.on('game:spin', async (data)=>{
+    const betAmount = parseFloat(data.betAmount);
+    const clientSeed = String(data.clientSeed || 'default');
+    const minBet = await getSetting('min_bet', 10);
+    const maxBet = await getSetting('max_bet', 5000);
+    const rtp = await getSetting('global_rtp', 96); // 80-98, sabke liye ek
+    if(!betAmount || betAmount<minBet || betAmount>maxBet) return socket.emit('game:error',{message:`Bet ${minBet} se ${maxBet} ke beech rakho`});
 
-  // --- GAME SPIN WITH GLOBAL RTP & USER RIGGING INTEGRATION ---
-  socket.on('game:spin', async (data) => {
-    const { userId, betAmount, clientSeed = 'default_client_seed' } = data;
+    const tx = await placeBet(userId, betAmount);
+    if(!tx.success) return socket.emit('game:error',{message: tx.error});
 
-    // 1. Deduct bet amount securely using ACID transaction
-    const txResult = await placeBet(userId, betAmount);
-    if (!txResult.success) {
-      return socket.emit('game:error', { message: txResult.error });
-    }
+    // Fair Outcome - RTP se Payout nikalta hai, kisi ek ko target nahi karta
+    // Example: RTP 96% aur Payout 2x ho to Win Chance = 48%
+    // Yaha simple 2x game ke liye:
+    const { val } = fairOutcome(serverSeed, clientSeed, nonce);
+    const winChance = Math.floor((rtp / 2) * 100); // RTP 96 -> 4800 / 10000 = 48%
+    const isWin = val < winChance;
+    const winnings = isWin ? betAmount * 2 : 0;
+    let finalBalance = tx.newBalance;
+    if(isWin) finalBalance = await creditWin(userId, winnings);
 
-    // 2. Calculate provably fair outcome (1 to 100)
-    const { outcome } = calculateProvablyFairOutcome(currentServerSeed, clientSeed, nonce);
-
-    // 3. Fetch Global RTP and Individual User Rigging from Firebase
-    const globalRtp = await getGlobalRTP();
-    const userControlData = await getUserGameControl(userId);
-
-    let isWin = false;
-
-    if (userControlData.control === 'force_win') {
-      isWin = true;
-    } else if (userControlData.control === 'force_loss') {
-      isWin = false;
-    } else if (userControlData.control === 'percentage_loss') {
-      // If percentage loss is set, use loss percentage threshold
-      const lossChance = userControlData.lossPercentage; // e.g. 80%
-      isWin = outcome > lossChance; 
-    } else {
-      // Normal gameplay governed by Global RTP (e.g. RTP = 10 means outcome <= 10 wins)
-      isWin = outcome <= globalRtp;
-    }
-
-    let winnings = isWin ? betAmount * 2 : 0;
-    let finalBalance = txResult.newBalance;
-
-    // 4. If user wins, credit winnings back to PostgreSQL database securely
-    if (isWin && winnings > 0) {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        const updateRes = await client.query(
-          'UPDATE wallets SET balance = balance + $1, updated_at = NOW() WHERE user_id = $2 RETURNING balance',
-          [winnings, userId]
-        );
-        await client.query(
-          `INSERT INTO transactions (user_id, amount, type, status) VALUES ($1, $2, 'WIN', 'SUCCESS')`,
-          [winnings, userId]
-        );
-        await client.query('COMMIT');
-        finalBalance = parseFloat(updateRes.rows[0].balance);
-      } catch (err) {
-        await client.query('ROLLBACK');
-        console.error('Error crediting winnings to DB:', err);
-      } finally {
-        client.release();
-      }
-    }
-
-    // 5. Emit the final result to the socket client
-    socket.emit('game:result', {
-      outcome,
-      isWin,
-      winnings,
-      newBalance: finalBalance,
-      nonce,
-      serverSeedHash,
-      revealedServerSeed: currentServerSeed
-    });
-
+    socket.emit('game:result',{ outcome: val, isWin, winnings, newBalance: finalBalance, nonce, serverSeedHash: seedHash, revealedServerSeed: serverSeed });
     nonce++;
+    // Har 100 spin pe naya Seed - taaki koi Seed guess na kar paye
+    if(nonce % 100 === 0){ serverSeed = generateServerSeed(); seedHash = hashSeed(serverSeed); nonce = 1; socket.emit('provably-fair:init',{ serverSeedHash: seedHash }); }
   });
 
-  socket.on('disconnect', () => {
-    console.log(`Client disconnected: ${socket.id}`);
+  // ---- AVIATOR BET / CASHOUT ----
+  socket.on('aviator:bet', async (data)=>{
+    if(gameState!=='WAITING') return socket.emit('game:error',{message:'Betting band ho gayi, agle round me try karo'});
+    const bet = parseFloat(data.betAmount);
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    const tx = await placeBet(userId, bet);
+    if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    aviatorBets.set(socket.id,{ userId, bet, cashedOut:false });
+    socket.emit('aviator:bet-placed',{ bet, newBalance: tx.newBalance });
   });
+  socket.on('aviator:cashout', async ()=>{
+    const b = aviatorBets.get(socket.id);
+    if(!b || b.cashedOut) return socket.emit('game:error',{message:'Bet nahi hai'});
+    if(gameState!=='RUNNING') return socket.emit('game:error',{message:'Game abhi chal nahi rahi'});
+    b.cashedOut = true;
+    const win = parseFloat((b.bet * currentMultiplier).toFixed(2));
+    const bal = await creditWin(userId, win);
+    socket.emit('aviator:cashed',{ win, multiplier: currentMultiplier, newBalance: bal });
+  });
+  socket.on('disconnect',()=>{ aviatorBets.delete(socket.id); });
 });
 
-app.get('/', (req, res) => {
-  res.send('RMG Production Real-Time WebSocket & 2Factor OTP Server is running successfully!');
-});
-
+app.get('/',(req,res)=>res.send('Secure RMG Backend Running!'));
 const PORT = process.env.PORT || 4000;
-
-initDatabase().then(() => {
-  server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    startAviatorGameLoop();
-  });
-});
+initDatabase().then(()=>{ server.listen(PORT,()=>{ console.log(`Server on ${PORT}`); startAviator(); }); });
