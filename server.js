@@ -1,4 +1,4 @@
-// ================= FULL CASINO - 11 GAMES - PART 1 - UPDATED - FIXED =================
+// ================= FULL CASINO - 15 GAMES - PART 2 - FINAL SECURE =================
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -47,7 +47,6 @@ const MY_UPI_NAME = "Aahi";
 const MY_MIN_DEPOSIT = 150;
 const MY_MIN_WITHDRAW = 300;
 
-// Frontend ko UPI batane ke liye
 app.get('/api/payment-info', (req, res) => {
   res.json({
     success: true,
@@ -59,7 +58,6 @@ app.get('/api/payment-info', (req, res) => {
   });
 });
 
-// ===== DYNAMIC QR - HAR PAYMENT PAR ALAG QR - NEW ADDED =====
 app.post('/api/deposit/create-qr', checkAuth, async (req, res) => {
   const depositAmount = parseFloat(req.body.amount);
   if(!depositAmount || depositAmount < MY_MIN_DEPOSIT){
@@ -127,7 +125,6 @@ async function audit(actor, action, details, ip) {
 
 async function initDatabase() {
   await pool.query(`CREATE TABLE IF NOT EXISTS wallets (id SERIAL PRIMARY KEY, user_id VARCHAR(255) UNIQUE NOT NULL, balance NUMERIC(12,2) DEFAULT 0 CHECK(balance>=0), vip_level INT DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW())`);
-  // Purani table me bhi column pakka karo
   await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`).catch(()=>{});
   await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`).catch(()=>{});
   await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vip_level INTEGER DEFAULT 0;`).catch(()=>{});
@@ -137,8 +134,8 @@ async function initDatabase() {
   await pool.query(`CREATE TABLE IF NOT EXISTS admin_users (id SERIAL PRIMARY KEY, username VARCHAR(100) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT 'admin')`);
   await pool.query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, actor_id VARCHAR(255) NOT NULL, action_type VARCHAR(100) NOT NULL, details TEXT, ip_address VARCHAR(50), created_at TIMESTAMP DEFAULT NOW())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL)`);
-  await pool.query(`INSERT INTO settings (key, value) VALUES ('global_rtp','96'), ('min_bet','10'), ('max_bet','5000'), ('teenpatti_rake','5'), ('teenpatti_boot','5'), ('aviator_house_edge','4'), ('aviator_min_crash','1.10'), ('aviator_max_crash','100'), ('spin_rtp','96'), ('dragontiger_rtp','96'), ('roulette_rtp','96'), ('mines_rtp','96'), ('andarbahar_rtp','96'), ('plinko_rtp','96'), ('baccarat_rtp','96'), ('poker_rtp','96'), ('slots_rtp','96') ON CONFLICT (key) DO NOTHING`);
-  console.log('DB Ready - FULL CASINO 11 GAMES!');
+  await pool.query(`INSERT INTO settings (key, value) VALUES ('global_rtp','96'), ('min_bet','10'), ('max_bet','5000'), ('teenpatti_rake','5'), ('teenpatti_boot','5'), ('aviator_house_edge','4'), ('aviator_min_crash','1.10'), ('aviator_max_crash','100'), ('spin_rtp','96'), ('dragontiger_rtp','96'), ('roulette_rtp','96'), ('mines_rtp','96'), ('andarbahar_rtp','96'), ('plinko_rtp','96'), ('baccarat_rtp','96'), ('poker_rtp','96'), ('slots_rtp','96'), ('colour_rtp','96'), ('chicken_rtp','96'), ('fortunegems_rtp','96'), ('gemstemple_rtp','96') ON CONFLICT (key) DO NOTHING`);
+  console.log('DB Ready - FULL CASINO 15 GAMES!');
 }
 
 async function getSetting(key, def) {
@@ -432,8 +429,8 @@ app.post('/api/admin/spin-settings', checkAdmin, async (req,res)=>{
 });
 
 app.post('/api/admin/casino-settings', checkAdmin, async (req,res)=>{
-  const { dragontiger_rtp, roulette_rtp, mines_rtp, andarbahar_rtp, plinko_rtp, baccarat_rtp, poker_rtp, slots_rtp } = req.body;
-  const map = { dragontiger_rtp, roulette_rtp, mines_rtp, andarbahar_rtp, plinko_rtp, baccarat_rtp, poker_rtp, slots_rtp };
+  const { dragontiger_rtp, roulette_rtp, mines_rtp, andarbahar_rtp, plinko_rtp, baccarat_rtp, poker_rtp, slots_rtp, colour_rtp, chicken_rtp, fortunegems_rtp, gemstemple_rtp } = req.body;
+  const map = { dragontiger_rtp, roulette_rtp, mines_rtp, andarbahar_rtp, plinko_rtp, baccarat_rtp, poker_rtp, slots_rtp, colour_rtp, chicken_rtp, fortunegems_rtp, gemstemple_rtp };
   for(let k in map){
     if(map[k]!==undefined) await pool.query(`INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2`,[k, String(map[k])]);
   }
@@ -464,7 +461,7 @@ app.post('/api/wallet/withdraw', checkAuth, async (req,res)=>{
     c.release();
   }
 });
-// ================= PART 2 - SOCKET + 11 GAMES =================
+// ================= PART 2 - SOCKET + 15 GAMES =================
 
 io.use((socket, next)=>{
   const token = socket.handshake.auth?.token;
@@ -486,6 +483,7 @@ io.on('connection',(socket)=>{
   socket.emit('provably-fair:init',{ serverSeedHash: seedHash });
   socket.emit('game:state',{ gameState, currentMultiplier, roundTimer, roundId });
 
+  // ===== 1. SPIN =====
   socket.on('game:spin', async (data)=>{
     const betAmount = parseFloat(data.betAmount);
     const clientSeed = String(data.clientSeed || 'default');
@@ -511,6 +509,7 @@ io.on('connection',(socket)=>{
     }
   });
 
+  // ===== 2. AVIATOR =====
   socket.on('aviator:bet', async (data)=>{
     if(gameState!=='WAITING') return socket.emit('game:error',{message:'Betting band ho gayi, agle round me try karo'});
     const bet = parseFloat(data.betAmount);
@@ -531,6 +530,7 @@ io.on('connection',(socket)=>{
     socket.emit('aviator:cashed',{ win, multiplier: currentMultiplier, newBalance: bal });
   });
 
+  // ===== 3. TEEN PATTI =====
   socket.on('teenpatti:join', async (data)=>{
     const tableId = data.tableId || 'table1';
     const boot = await getSetting('teenpatti_boot', 5);
@@ -611,6 +611,7 @@ io.on('connection',(socket)=>{
     teenTables.delete(tableId);
   });
 
+  // ===== 4. DRAGON VS TIGER =====
   socket.on('dragontiger:bet', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const choice = data.choice;
@@ -634,6 +635,7 @@ io.on('connection',(socket)=>{
     socket.emit('dragontiger:result',{ dragonCard: dCard, tigerCard: tCard, winner, choice, isWin, winnings, newBalance: bal });
   });
 
+  // ===== 5. ROULETTE =====
   socket.on('roulette:bet', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const choice = data.choice;
@@ -654,6 +656,7 @@ io.on('connection',(socket)=>{
     socket.emit('roulette:result',{ number: num, color, choice, isWin, winnings, newBalance: bal });
   });
 
+  // ===== 6. MINES =====
   socket.on('mines:play', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const minesCount = parseInt(data.mines) || 3;
@@ -672,6 +675,7 @@ io.on('connection',(socket)=>{
     socket.emit('mines:result',{ minePositions: [...minePositions], picked, hitMine, isWin: !hitMine, winnings, multiplier: parseFloat(multiplier.toFixed(2)), newBalance: bal });
   });
 
+  // ===== 7. ANDAR BAHAR =====
   socket.on('andarbahar:bet', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const choice = data.choice;
@@ -701,6 +705,7 @@ io.on('connection',(socket)=>{
     socket.emit('andarbahar:result',{ joker, winner, choice, isWin, winnings, cards, newBalance: bal });
   });
 
+  // ===== 8. PLINKO =====
   socket.on('plinko:play', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const risk = data.risk || 'MEDIUM';
@@ -727,6 +732,7 @@ io.on('connection',(socket)=>{
     socket.emit('plinko:result',{ path, slot, multiplier: mult, winnings, newBalance: bal, risk });
   });
 
+  // ===== 9. BACCARAT =====
   socket.on('baccarat:bet', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const choice = data.choice;
@@ -759,6 +765,7 @@ io.on('connection',(socket)=>{
     socket.emit('baccarat:result',{ playerCards: pCards, bankerCards: bCards, playerTotal: pTotal, bankerTotal: bTotal, winner, choice, isWin, winnings, newBalance: bal });
   });
 
+  // ===== 10. POKER =====
   socket.on('poker:play', async (data)=>{
     const bet = parseFloat(data.betAmount);
     if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
@@ -798,6 +805,7 @@ io.on('connection',(socket)=>{
     socket.emit('poker:result',{ myCards, botCards, myHand: myScore.name, botHand: botScore.name, isWin, isTie, winnings, newBalance: bal });
   });
 
+  // ===== 11. SLOTS - 777 =====
   socket.on('slots:spin', async (data)=>{
     const bet = parseFloat(data.betAmount);
     if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
@@ -818,12 +826,103 @@ io.on('connection',(socket)=>{
     socket.emit('slots:result',{ reels:[r1,r2,r3], isWin, winName, multiplier: mult, winnings, newBalance: bal });
   });
 
+  // ===== 12. COLOUR TRADING - WINGO SECURE =====
+  socket.on('colour:bet', async (data)=>{
+    const bet = parseFloat(data.betAmount);
+    const target = data.target;
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    const tx = await placeBet(userId, bet);
+    if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    const num = fairRandom(10);
+    let color = '';
+    if(num===0) color='RED-VIOLET';
+    else if(num===5) color='GREEN-VIOLET';
+    else if([1,3,7,9].includes(num)) color='GREEN';
+    else if([2,4,6,8].includes(num)) color='RED';
+    let size = num>=5 ? 'BIG' : 'SMALL';
+    let isWin = false, mult = 0;
+    if(String(target)===String(num)){ isWin=true; mult=9; }
+    else if(target==='RED' && (color==='RED' || color==='RED-VIOLET')){ isWin=true; mult=2; }
+    else if(target==='GREEN' && (color==='GREEN' || color==='GREEN-VIOLET')){ isWin=true; mult=2; }
+    else if(target==='VIOLET' && (color.includes('VIOLET'))){ isWin=true; mult=4.5; }
+    else if(target==='BIG' && size==='BIG'){ isWin=true; mult=2; }
+    else if(target==='SMALL' && size==='SMALL'){ isWin=true; mult=2; }
+    let winnings = isWin ? parseFloat((bet*mult).toFixed(2)) : 0;
+    let bal = tx.newBalance;
+    if(isWin) bal = await creditWin(userId, winnings);
+    socket.emit('colour:result',{ number:num, color, size, target, isWin, winnings, multiplier:mult, newBalance:bal });
+  });
+
+  // ===== 13. CHICKEN ROAD - SECURE =====
+  socket.on('chicken:play', async (data)=>{
+    const bet = parseFloat(data.betAmount);
+    const stepsWant = parseInt(data.steps) || 1;
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    if(stepsWant<1 || stepsWant>5) return socket.emit('game:error',{message:'1 se 5 step chuno'});
+    const tx = await placeBet(userId, bet);
+    if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    const MULTS = [1.20, 1.50, 2.00, 3.50, 5.00];
+    const crashAt = fairRandom(6);
+    let isWin = crashAt >= stepsWant;
+    if(stepsWant===5) isWin = fairRandom(100) > 35;
+    let mult = MULTS[stepsWant-1];
+    let winnings = isWin ? parseFloat((bet*mult).toFixed(2)) : 0;
+    let bal = tx.newBalance;
+    if(isWin) bal = await creditWin(userId, winnings);
+    socket.emit('chicken:result',{ steps:stepsWant, reached: isWin ? stepsWant : crashAt, isWin, multiplier: isWin?mult:0, winnings, newBalance:bal });
+  });
+
+  // ===== 14. FORTUNE GEMS - SECURE =====
+  socket.on('fortunegems:spin', async (data)=>{
+    const bet = parseFloat(data.betAmount);
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    const tx = await placeBet(userId, bet);
+    if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    const symbols = ['🔴','🔵','🟢','⭐'];
+    let grid = [];
+    for(let i=0;i<9;i++) grid.push(symbols[fairRandom(symbols.length)]);
+    let counts = {};
+    grid.forEach(s=> counts[s]=(counts[s]||0)+1);
+    let maxCount = Math.max(...Object.values(counts));
+    let mult = 0, winName = '';
+    if(maxCount>=7){ mult=15; winName='MEGA GEMS!'; }
+    else if(maxCount>=5){ mult=5; winName='SUPER GEMS!'; }
+    else if(maxCount>=4){ mult=2; winName='GEMS MATCH!'; }
+    else if(maxCount>=3){ mult=1.5; winName='SMALL WIN!'; }
+    let isWin = mult>0;
+    let winnings = isWin ? parseFloat((bet*mult).toFixed(2)) : 0;
+    let bal = tx.newBalance;
+    if(isWin) bal = await creditWin(userId, winnings);
+    socket.emit('fortunegems:result',{ grid, isWin, winName, multiplier:mult, winnings, newBalance:bal });
+  });
+
+  // ===== 15. GEMS TEMPLE - SECURE =====
+  socket.on('gemstemple:spin', async (data)=>{
+    const bet = parseFloat(data.betAmount);
+    if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
+    const tx = await placeBet(userId, bet);
+    if(!tx.success) return socket.emit('game:error',{message: tx.error});
+    const symbols = ['💎','7️⃣','🔴','🟢','🟡','🟦'];
+    let reels = [symbols[fairRandom(symbols.length)], symbols[fairRandom(symbols.length)], symbols[fairRandom(symbols.length)]];
+    let mult = 0, winName = '';
+    if(reels[0]==='💎' && reels[1]==='💎' && reels[2]==='💎'){ mult=50; winName='TEMPLE JACKPOT!'; }
+    else if(reels[0]==='7️⃣' && reels[1]==='7️⃣' && reels[2]==='7️⃣'){ mult=50; winName='777 JACKPOT!'; }
+    else if(reels[0]===reels[1] && reels[1]===reels[2]){ mult=15; winName='TRIPLE MATCH!'; }
+    else if(reels[0]===reels[1] || reels[1]===reels[2] || reels[0]===reels[2]){ mult=5; winName='DOUBLE MATCH!'; }
+    else if(reels.includes('💎')){ mult=2; winName='DIAMOND!'; }
+    let isWin = mult>0;
+    let winnings = isWin ? parseFloat((bet*mult).toFixed(2)) : 0;
+    let bal = tx.newBalance;
+    if(isWin) bal = await creditWin(userId, winnings);
+    socket.emit('gemstemple:result',{ reels, isWin, winName, multiplier:mult, winnings, newBalance:bal });
+  });
+
   socket.on('disconnect',()=>{
     aviatorBets.delete(socket.id);
   });
 });
 
-app.get('/',(req,res)=>res.send('FULL CASINO 11 GAMES Running!'));
+app.get('/',(req,res)=>res.send('FULL CASINO 15 GAMES Running!'));
 
 const PORT = process.env.PORT || 4000;
 initDatabase().then(()=>{
