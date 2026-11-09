@@ -1,4 +1,4 @@
-// ================= FULL CASINO - 15 GAMES - PART 2 - FINAL SECURE =================
+// ================= FULL CASINO - 15 GAMES - PART 2 - FINAL SECURE - CORS FIXED =================
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -12,7 +12,10 @@ const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }));
+// ===== CORS FIX - TERA TIINY SE OTP NAHI AA RAHA THA ISI WAJAH SE =====
+// Pehle sirf localhost:3000 allow tha, ab sab allow hai - Tiiny, Netlify, sab chalega
+app.use(cors({ origin: true, credentials: true }));
+app.options('*', cors({ origin: true, credentials: true }));
 app.use(express.json());
 
 const otpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { success: false, message: 'Bahut zyada try kiya, 15 min baad try karo' } });
@@ -20,7 +23,7 @@ const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 });
 app.use('/api/', apiLimiter);
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: process.env.FRONTEND_URL || 'http://localhost:3000' } });
+const io = new Server(server, { cors: { origin: true, methods: ["GET","POST"], credentials: true } });
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 // ===== FIXED - STARTUP PE HI SAARE COLUMN BANAO =====
@@ -57,6 +60,8 @@ app.get('/api/payment-info', (req, res) => {
     message: `Min Deposit ₹${MY_MIN_DEPOSIT} | Min Withdraw ₹${MY_MIN_WITHDRAW}`
   });
 });
+
+app.get('/api/health', (req,res)=>{ res.json({success:true, msg:'Backend ON hai', time: new Date().toISOString()}); });
 
 app.post('/api/deposit/create-qr', checkAuth, async (req, res) => {
   const depositAmount = parseFloat(req.body.amount);
@@ -281,18 +286,19 @@ app.post('/api/auth/send-otp', otpLimiter, async (req,res)=>{
   const { mobile } = req.body;
   if(!mobile || !/^[6-9]\d{9}$/.test(mobile)) return res.status(400).json({success:false,message:'Sahi 10 digit mobile daalo'});
   const apiKey = process.env.TWO_FACTOR_API_KEY;
-  if(!apiKey) return res.status(500).json({success:false,message:'OTP service band hai'});
+  if(!apiKey) return res.status(500).json({success:false,message:'OTP service band hai - TWO_FACTOR_API_KEY Render me nahi dala'});
   try{
     const data = await safeHttpsGet(`https://2factor.in/API/V1/${apiKey}/SMS/${mobile}/AUTOGEN/OTP1`);
+    console.log('2Factor send-otp response:', data);
     if(data.Status==='Success'){
       otpStore.set(mobile,{ sessionId:data.Details, expiresAt: Date.now()+5*60*1000 });
       res.json({success:true,message:'OTP bhej diya'});
     } else {
-      res.status(400).json({success:false,message:'OTP nahi bheja gaya'});
+      res.status(400).json({success:false,message:'OTP nahi bheja gaya - '+(data.Details||data.Status||'2Factor error')});
     }
   }catch(e){
     console.error(e);
-    res.status(500).json({success:false,message:'OTP fail'});
+    res.status(500).json({success:false,message:'OTP fail - '+e.message});
   }
 });
 
