@@ -1,4 +1,4 @@
-// ================= FULL CASINO - 11 GAMES - PART 1 - UPDATED =================
+// ================= FULL CASINO - 11 GAMES - PART 1 - UPDATED - FIXED =================
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -22,13 +22,21 @@ app.use('/api/', apiLimiter);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: process.env.FRONTEND_URL || 'http://localhost:3000' } });
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+
+// ===== FIXED - STARTUP PE HI SAARE COLUMN BANAO =====
 pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`).catch(()=>{});
 pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`).catch(()=>{});
+pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vip_level INTEGER DEFAULT 0;`).catch(()=>{});
+pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS balance NUMERIC(12,2) DEFAULT 0;`).catch(()=>{});
+
 app.get('/fix-db', async (req, res) => {
   try {
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`);
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`);
-    res.send('HO GAYA! Column ban gaya!');
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vip_level INTEGER DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS balance NUMERIC(12,2) DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();`);
+    res.send('HO GAYA! Sab column ban gaye - vip_level bhi!');
   } catch (e) {
     res.send('ERROR: ' + e.message);
   }
@@ -119,6 +127,10 @@ async function audit(actor, action, details, ip) {
 
 async function initDatabase() {
   await pool.query(`CREATE TABLE IF NOT EXISTS wallets (id SERIAL PRIMARY KEY, user_id VARCHAR(255) UNIQUE NOT NULL, balance NUMERIC(12,2) DEFAULT 0 CHECK(balance>=0), vip_level INT DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW())`);
+  // Purani table me bhi column pakka karo
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vip_level INTEGER DEFAULT 0;`).catch(()=>{});
   await pool.query(`CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, type VARCHAR(50) NOT NULL, status VARCHAR(50) NOT NULL, utr VARCHAR(100), created_at TIMESTAMP DEFAULT NOW())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS deposits (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, utr VARCHAR(100) UNIQUE NOT NULL, status VARCHAR(20) DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
   await pool.query(`CREATE TABLE IF NOT EXISTS withdraws (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, method VARCHAR(20) DEFAULT 'UPI', upi_id VARCHAR(255), account_no VARCHAR(50), ifsc VARCHAR(20), status VARCHAR(20) DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
@@ -317,7 +329,6 @@ app.get('/api/wallet/history', checkAuth, async (req,res)=>{
   res.json({success:true, history: r.rows});
 });
 
-// ===== DEPOSIT - MIN 150 UPDATED =====
 app.post('/api/wallet/deposit-request', checkAuth, async (req,res)=>{
   const { amount, utr } = req.body;
   if(!amount || amount < 150) return res.status(400).json({success:false,message:'Min ₹150 Deposit hai bhai!'});
@@ -429,7 +440,6 @@ app.post('/api/admin/casino-settings', checkAdmin, async (req,res)=>{
   res.json({success:true,message:'Casino Games Save Ho Gaye!'});
 });
 
-// ===== WITHDRAW - MIN 300 UPDATED =====
 app.post('/api/wallet/withdraw', checkAuth, async (req,res)=>{
   const { amount, upi_id, account_no, ifsc } = req.body;
   const userId = req.user.mobile;
@@ -476,7 +486,6 @@ io.on('connection',(socket)=>{
   socket.emit('provably-fair:init',{ serverSeedHash: seedHash });
   socket.emit('game:state',{ gameState, currentMultiplier, roundTimer, roundId });
 
-  // ===== 1. SPIN =====
   socket.on('game:spin', async (data)=>{
     const betAmount = parseFloat(data.betAmount);
     const clientSeed = String(data.clientSeed || 'default');
@@ -502,7 +511,6 @@ io.on('connection',(socket)=>{
     }
   });
 
-  // ===== 2. AVIATOR =====
   socket.on('aviator:bet', async (data)=>{
     if(gameState!=='WAITING') return socket.emit('game:error',{message:'Betting band ho gayi, agle round me try karo'});
     const bet = parseFloat(data.betAmount);
@@ -523,7 +531,6 @@ io.on('connection',(socket)=>{
     socket.emit('aviator:cashed',{ win, multiplier: currentMultiplier, newBalance: bal });
   });
 
-  // ===== 3. TEEN PATTI =====
   socket.on('teenpatti:join', async (data)=>{
     const tableId = data.tableId || 'table1';
     const boot = await getSetting('teenpatti_boot', 5);
@@ -604,7 +611,6 @@ io.on('connection',(socket)=>{
     teenTables.delete(tableId);
   });
 
-  // ===== 4. DRAGON VS TIGER =====
   socket.on('dragontiger:bet', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const choice = data.choice;
@@ -628,7 +634,6 @@ io.on('connection',(socket)=>{
     socket.emit('dragontiger:result',{ dragonCard: dCard, tigerCard: tCard, winner, choice, isWin, winnings, newBalance: bal });
   });
 
-  // ===== 5. ROULETTE =====
   socket.on('roulette:bet', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const choice = data.choice;
@@ -649,7 +654,6 @@ io.on('connection',(socket)=>{
     socket.emit('roulette:result',{ number: num, color, choice, isWin, winnings, newBalance: bal });
   });
 
-  // ===== 6. MINES =====
   socket.on('mines:play', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const minesCount = parseInt(data.mines) || 3;
@@ -668,7 +672,6 @@ io.on('connection',(socket)=>{
     socket.emit('mines:result',{ minePositions: [...minePositions], picked, hitMine, isWin: !hitMine, winnings, multiplier: parseFloat(multiplier.toFixed(2)), newBalance: bal });
   });
 
-  // ===== 7. ANDAR BAHAR =====
   socket.on('andarbahar:bet', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const choice = data.choice;
@@ -698,7 +701,6 @@ io.on('connection',(socket)=>{
     socket.emit('andarbahar:result',{ joker, winner, choice, isWin, winnings, cards, newBalance: bal });
   });
 
-  // ===== 8. PLINKO =====
   socket.on('plinko:play', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const risk = data.risk || 'MEDIUM';
@@ -725,7 +727,6 @@ io.on('connection',(socket)=>{
     socket.emit('plinko:result',{ path, slot, multiplier: mult, winnings, newBalance: bal, risk });
   });
 
-  // ===== 9. BACCARAT =====
   socket.on('baccarat:bet', async (data)=>{
     const bet = parseFloat(data.betAmount);
     const choice = data.choice;
@@ -758,7 +759,6 @@ io.on('connection',(socket)=>{
     socket.emit('baccarat:result',{ playerCards: pCards, bankerCards: bCards, playerTotal: pTotal, bankerTotal: bTotal, winner, choice, isWin, winnings, newBalance: bal });
   });
 
-  // ===== 10. POKER =====
   socket.on('poker:play', async (data)=>{
     const bet = parseFloat(data.betAmount);
     if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
@@ -798,7 +798,6 @@ io.on('connection',(socket)=>{
     socket.emit('poker:result',{ myCards, botCards, myHand: myScore.name, botHand: botScore.name, isWin, isTie, winnings, newBalance: bal });
   });
 
-  // ===== 11. SLOTS - 777 =====
   socket.on('slots:spin', async (data)=>{
     const bet = parseFloat(data.betAmount);
     if(!bet || bet<10) return socket.emit('game:error',{message:'Min Bet ₹10'});
