@@ -398,7 +398,7 @@ app.post('/api/wallet/deposit-request', checkAuth, async (req, res) => {
   const { amount, utr } = req.body;
   if (!amount || amount < 150) { return res.status(400).json({ success: false, message: 'Min ₹150 Deposit hai bhai!' }); }
   if (!utr || utr.length < 6) { return res.status(400).json({ success: false, message: 'Sahi UTR daalo' }); }
-  const blocked = await checkBlocked(req.user.mobile);
+    const blocked = await checkBlocked(req.user.mobile);
   if (blocked.blocked) { return res.status(403).json({ success: false, message: blocked.reason }); }
   try {
     await pool.query('INSERT INTO deposits (user_id, amount, utr) VALUES ($1,$2,$3)', [req.user.mobile, amount, utr]);
@@ -616,8 +616,8 @@ io.on('connection', (socket) => {
   function getOrCreateTeenTable(tableId, boot){
     if(!teenTables.has(tableId)){
       teenTables.set(tableId, {
-        pot: 0, blind: boot, turnIdx: 0,
-        order: [], // Real + Bot seat - dynamic
+        pot: 0, blind: boot, currentChaal: boot, turnIdx: 0,
+        order: [],
         active: {}, seenMap: {}, cardsMap: {}, puts: {},
         players: [], watchers: [],
         started: false, timer: null, lastAction: null, startTimeout: null
@@ -626,14 +626,14 @@ io.on('connection', (socket) => {
     return teenTables.get(tableId);
   }
   function clearTeenTimer(table){ if(table.timer){ clearTimeout(table.timer); table.timer=null; } }
+  function teenRecalcPot(table){ table.pot = Object.values(table.puts||{}).reduce((a,b)=>a+(parseFloat(b)||0),0); return table.pot; }
+  function teenCost(table, seat){ return table.seenMap[seat] ? table.currentChaal*2 : table.currentChaal; }
   function teenBotAction(tableId){
     let table = teenTables.get(tableId); if(!table || !table.started) return;
     let who = table.order[table.turnIdx];
     if(!who || !table.active[who]) return;
-    // Real player hai to kuch mat kar - uska 10 sec timer chalega
     let isBot = table.players.find(p=>p.seat===who)?.isBot;
     if(!isBot) return;
-    // Bot 2-4 sec me sochega
     clearTeenTimer(table);
     table.timer = setTimeout(()=>{
       let t = teenTables.get(tableId); if(!t || !t.started) return;
@@ -650,11 +650,12 @@ io.on('connection', (socket) => {
         io.to(tableId).emit('teenpatti:player-packed', { userId: who, reason:'PACK', name: who });
       } else {
         if(Math.random()<0.3) t.seenMap[who]=true;
-        let botCost = t.seenMap[who] ? t.blind*2 : t.blind;
-        t.pot += botCost;
+        if(ev.score>=400 && Math.random()<0.25){ t.currentChaal = t.currentChaal*2; }
+        let botCost = teenCost(t, who);
         t.puts[who] = (t.puts[who]||0) + botCost;
-        io.to(tableId).emit('teenpatti:bot-action', { bot: who, action: t.seenMap[who]?'CHAAL':'BLIND', amount: botCost, totalPut: t.puts[who], puts: t.puts });
-        io.to(tableId).emit('teenpatti:pot-update', { pot: t.pot, blind: t.blind, seen: t.blind*2, puts: t.puts, lastAction:{ userId: who, action: t.seenMap[who]?'CHAAL':'BLIND', amount: botCost, totalPut: t.puts[who] } });
+        teenRecalcPot(t);
+        io.to(tableId).emit('teenpatti:bot-action', { bot: who, action: t.seenMap[who]?'CHAAL':'BLIND', amount: botCost, totalPut: t.puts[who], puts: t.puts, currentChaal: t.currentChaal });
+        io.to(tableId).emit('teenpatti:pot-update', { pot: t.pot, blind: t.currentChaal, seen: t.currentChaal*2, currentChaal: t.currentChaal, puts: t.puts, lastAction:{ userId: who, action: t.seenMap[who]?'CHAAL':'BLIND', amount: botCost, totalPut: t.puts[who] } });
       }
       clearTeenTimer(t);
       teenNextTurn(tableId);
@@ -664,8 +665,7 @@ io.on('connection', (socket) => {
     let table = teenTables.get(tableId); if(!table) return;
     clearTeenTimer(table);
     let who = table.order[table.turnIdx];
-    io.to(tableId).emit('teenpatti:turn', { turn: who, blind: table.blind, seen: table.blind*2, pot: table.pot, puts: table.puts, time: 10 });
-    // Agar Bot hai to auto action, Real hai to 10 sec timeout
+    io.to(tableId).emit('teenpatti:turn', { turn: who, blind: table.currentChaal, seen: table.currentChaal*2, currentChaal: table.currentChaal, pot: table.pot, puts: table.puts, time: 10, yourCost: teenCost(table, who) });
     let isBot = table.players.find(p=>p.seat===who)?.isBot;
     if(isBot){ return teenBotAction(tableId); }
     table.timer = setTimeout(()=>{
@@ -701,7 +701,6 @@ io.on('connection', (socket) => {
     const totalPot = table.pot;
     const rake = Math.floor(totalPot * rakePercent / 100);
     const winnerAmount = totalPot - rake;
-    // Winner Real hai to usko paisa do, Bot hai to House rakhega
     let winnerPlayer = table.players.find(p=>p.seat===best);
     if(winnerPlayer && !winnerPlayer.isBot){
       await creditWin(winnerPlayer.userId, winnerAmount);
@@ -716,11 +715,9 @@ io.on('connection', (socket) => {
     const isWatch = !!data.watch;
     const boot = await getSetting('teenpatti_boot', 5);
     let table = getOrCreateTeenTable(tableId, boot);
-    // WATCH MODE - Paisa nahi katega, sirf dekhne dega
     if(isWatch){
       socket.join(tableId);
       table.watchers.push({ socketId: socket.id, userId });
-      // Agar game chal rahi hai to uska haal bhej do
       socket.emit('teenpatti:waiting', { message: 'Watch Mode - Real Game dekh rahe ho', pot: table.pot, boot, puts: table.puts });
       if(table.started){
         socket.emit('teenpatti:game-started', { pot: table.pot, blind: table.blind, seen: table.blind*2, turn: table.order[table.turnIdx], puts: table.puts });
@@ -733,12 +730,11 @@ io.on('connection', (socket) => {
     if(table.players.length >= 5){ return socket.emit('game:error', { message: 'Table full hai, agle game me aao' }); }
     const tx = await placeBet(userId, boot);
     if(!tx.success) return socket.emit('game:error', { message: tx.error });
-    // Seat assign - Pehla Real = Seat 0, Dusra Real = Seat 1, baaki Bot
-    let seatName = 'P' + (table.players.length+1); // P1, P2...
-    // Frontend ke liye - Pehla player khud ko 'You' samjhega, baaki ko unke naam se
+    let seatName = 'P' + (table.players.length+1);
     table.players.push({ socketId: socket.id, userId, seat: seatName, isBot:false, status:'ACTIVE' });
-    table.pot += boot;
     table.puts[seatName] = boot;
+    table.currentChaal = boot;
+    teenRecalcPot(table);
     socket.join(tableId);
     socket.data.teenSeat = seatName;
     socket.data.teenTable = tableId;
@@ -747,39 +743,34 @@ io.on('connection', (socket) => {
       table.startTimeout = setTimeout(()=>{
         let t = teenTables.get(tableId); if(!t || t.started) return;
         t.started = true;
-        // Bachi hui seat pe Bot bhar do - Total 5 seat
         const botNames = ['Vikram','Rahul','Apurbo','Bapan'];
         let botIdx = 0;
         while(t.players.length < 5){
           let bSeat = 'BOT_' + botNames[botIdx];
           t.players.push({ socketId:'BOT_'+bSeat, userId:'BOT_'+bSeat, seat: bSeat, isBot:true, status:'ACTIVE' });
           t.puts[bSeat] = boot;
-          t.pot += boot;
+          teenRecalcPot(t);
           botIdx++;
         }
-        // Order = Real pehle, fir Bot - Turn P1 se start
         t.order = t.players.map(p=>p.seat);
         t.order.forEach(name=>{ t.active[name]=true; t.seenMap[name]=false; });
         let deck = shuffleDeck().map(tpCardFormat);
         let idx=0;
         t.order.forEach(name=>{ t.cardsMap[name] = [deck[idx++], deck[idx++], deck[idx++]]; });
-        // Har Real ko sirf uska card bhejo - SECURE - Dusre ka card nahi
         t.players.forEach(p=>{
           if(!p.isBot){
             io.to(p.socketId).emit('teenpatti:cards', { myCards: t.cardsMap[p.seat], pot: t.pot, boot: t.blind, puts: t.puts, seat: p.seat, players: t.order });
           }
         });
-        io.to(tableId).emit('teenpatti:game-started', { pot: t.pot, blind: t.blind, seen: t.blind*2, turn: t.order[0], puts: t.puts, order: t.order });
+        io.to(tableId).emit('teenpatti:game-started', { pot: t.pot, blind: t.currentChaal, seen: t.currentChaal*2, currentChaal: t.currentChaal, turn: t.order[0], puts: t.puts, order: t.order });
         t.turnIdx = 0;
         startTeenTurnTimer(tableId);
       }, 5000);
     } else {
-      // Dusra Real aaya to usko bhi waiting bhejo, 5 sec wala timer pehle se chal raha hai
       io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.blind, seen: table.blind*2, puts: table.puts });
     }
   });
 
-  // Helper - Socket se uski seat nikaalo
   function getMySeat(socket, tableId){
     if(socket.data.teenSeat) return socket.data.teenSeat;
     let table = teenTables.get(tableId); if(!table) return null;
@@ -792,23 +783,23 @@ io.on('connection', (socket) => {
     let table = teenTables.get(tableId); if(!table) return;
     let seat = getMySeat(socket, tableId); if(!seat) return;
     table.seenMap[seat] = true;
-    socket.emit('teenpatti:seen-ok', { seenAmount: table.blind*2, blind: table.blind, seat });
+    socket.emit('teenpatti:seen-ok', { seenAmount: table.currentChaal*2, blind: table.currentChaal, currentChaal: table.currentChaal, seat });
   });
-
+  
   socket.on('teenpatti:chaal', async (data) => {
     const tableId = data.tableId || 'table1';
     let table = teenTables.get(tableId); if(!table) return;
     let seat = getMySeat(socket, tableId); if(!seat) return socket.emit('game:error', { message: 'Table me nahi ho' });
     if(table.order[table.turnIdx] !== seat){ return socket.emit('game:error', { message: 'Abhi teri baari nahi hai' }); }
-    let expected = table.seenMap[seat] ? table.blind*2 : table.blind;
+    let expected = teenCost(table, seat);
     let chaalAmt = parseFloat(data.amount);
-    if(chaalAmt !== expected){ return socket.emit('game:error', { message: `Galat amount! Tujhe ₹${expected} dena hai (Blind ₹${table.blind} Seen ₹${table.blind*2})` }); }
+    if(chaalAmt !== expected){ return socket.emit('game:error', { message: `Galat amount! Abhi chaal ₹${table.currentChaal} hai, tujhe ₹${expected} dena hai (Blind ₹${table.currentChaal} Seen ₹${table.currentChaal*2})` }); }
     const tx = await placeBet(userId, chaalAmt);
     if(!tx.success) return socket.emit('game:error', { message: tx.error });
-    table.pot += chaalAmt;
     table.puts[seat] = (table.puts[seat]||0) + chaalAmt;
+    teenRecalcPot(table);
     table.lastAction = { userId: seat, action: table.seenMap[seat]?'CHAAL':'BLIND', amount: chaalAmt, totalPut: table.puts[seat] };
-    io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.blind, seen: table.blind*2, puts: table.puts, lastAction: table.lastAction });
+    io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.currentChaal, seen: table.currentChaal*2, currentChaal: table.currentChaal, puts: table.puts, lastAction: table.lastAction });
     clearTeenTimer(table);
     teenNextTurn(tableId);
   });
@@ -818,13 +809,14 @@ io.on('connection', (socket) => {
     let table = teenTables.get(tableId); if(!table) return;
     let seat = getMySeat(socket, tableId); if(!seat) return;
     if(table.order[table.turnIdx] !== seat) return socket.emit('game:error', { message: 'Teri baari nahi hai' });
-    // Blind x2 matlab is baari double do, agle round se blind double nahi hoga - sirf is chaal ka amount double
-    let cost = (table.seenMap[seat] ? table.blind*2 : table.blind) * 2;
+    // FIX: Blind x2 matlab chaal hi double - agle sabko bhi badhi hui chaal deni hogi
+    table.currentChaal = table.currentChaal * 2;
+    let cost = teenCost(table, seat);
     const tx = await placeBet(userId, cost);
     if(!tx.success){ return socket.emit('game:error', { message: tx.error }); }
-    table.pot += cost;
     table.puts[seat] = (table.puts[seat]||0) + cost;
-    io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.blind, seen: table.blind*2, puts: table.puts, lastAction:{ userId: seat, action:'BLIND x2', amount:cost, totalPut: table.puts[seat] } });
+    teenRecalcPot(table);
+    io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.currentChaal, seen: table.currentChaal*2, currentChaal: table.currentChaal, puts: table.puts, lastAction:{ userId: seat, action:'BLIND x2', amount:cost, totalPut: table.puts[seat] } });
     clearTeenTimer(table);
     teenNextTurn(tableId);
   });
@@ -851,23 +843,21 @@ io.on('connection', (socket) => {
       return socket.emit('game:error', { message: 'Side Show apni baari me hi hoga' });
     }
     let opp = data.opp;
-    // Frontend purana 'Bapan' bhejta hai to usko Bot seat me map karo
     if(opp && !table.order.includes(opp)){
       let found = table.players.find(p=>p.seat.includes(opp) || opp.includes(p.seat));
       if(found) opp = found.seat;
     }
     if(!opp) {
-      // Piche wala active player
       let idx = table.order.indexOf(seat);
       for(let k=1;k<5;k++){ let n = table.order[(idx - k + table.order.length)%table.order.length]; if(table.active[n]){ opp=n; break; } }
     }
     if(!opp || !table.active[opp]) return socket.emit('game:error', { message: 'Wo player Pack ho chuka hai' });
     if(!table.seenMap[seat]){ return socket.emit('game:error', { message: 'Side Show ke liye pehle SEE dabao' }); }
-    let cost = table.blind*2;
+    let cost = table.currentChaal*2;
     const tx = await placeBet(userId, cost);
     if(!tx.success) return socket.emit('game:error', { message: tx.error });
-    table.pot += cost;
     table.puts[seat] = (table.puts[seat]||0) + cost;
+    teenRecalcPot(table);
     let myRank = tpEvaluate(table.cardsMap[seat]);
     let oppRank = tpEvaluate(table.cardsMap[opp]);
     let meWin = myRank.score > oppRank.score;
@@ -878,7 +868,6 @@ io.on('connection', (socket) => {
     }
     let loser = meWin ? opp : seat;
     table.active[loser] = false;
-    // Sirf Side Show karne wale ko dono ke card dikhenge - PRIVATE
     socket.emit('teenpatti:sideshow-private', { you: table.cardsMap[seat], youRank: myRank.name, youScore: myRank.score, opp: table.cardsMap[opp], oppName: opp, oppRank: oppRank.name, oppScore: oppRank.score, winner: meWin?seat:opp, loser });
     socket.to(tableId).emit('teenpatti:sideshow-done', { winner: meWin?seat:opp, loser, pot: table.pot, puts: table.puts });
     io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.blind, seen: table.blind*2, puts: table.puts });
@@ -1178,7 +1167,6 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     aviatorBets.delete(socket.id);
-    // Teen Patti me disconnect hua to uski seat ko PACK kar do taaki game atke nahi
     let tableId = socket.data.teenTable;
     let seat = socket.data.teenSeat;
     if(tableId && seat){
@@ -1215,4 +1203,4 @@ initDatabase().then(() => {
     console.log(`Server on ${PORT} - PUBLIC SECURE`);
     startAviator();
   });
-});      
+});
