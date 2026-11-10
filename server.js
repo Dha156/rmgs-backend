@@ -833,6 +833,10 @@ io.on('connection', (socket) => {
     const tableId = data.tableId || 'table1';
     let table = teenTables.get(tableId); if(!table) return;
     let seat = getMySeat(socket, tableId); if(!seat) return;
+    if(table.order[table.turnIdx] !== seat){
+      return socket.emit('game:error', { message: 'Teri baari nahi hai, Pack nahi kar sakta' });
+    }
+    if(!table.active[seat]) return;
     table.active[seat] = false;
     io.to(tableId).emit('teenpatti:player-packed', { userId: seat, name: seat });
     clearTeenTimer(table);
@@ -843,6 +847,9 @@ io.on('connection', (socket) => {
     const tableId = data.tableId || 'table1';
     let table = teenTables.get(tableId); if(!table) return;
     let seat = getMySeat(socket, tableId); if(!seat) return;
+    if(table.order[table.turnIdx] !== seat){
+      return socket.emit('game:error', { message: 'Side Show apni baari me hi hoga' });
+    }
     let opp = data.opp;
     // Frontend purana 'Bapan' bhejta hai to usko Bot seat me map karo
     if(opp && !table.order.includes(opp)){
@@ -1176,7 +1183,20 @@ io.on('connection', (socket) => {
     let seat = socket.data.teenSeat;
     if(tableId && seat){
       let table = teenTables.get(tableId);
-      if(table && table.started && table.active[seat]){
+      if(table && !table.started){
+        let bootBack = table.puts[seat] || 0;
+        if(bootBack > 0){
+          let p = table.players.find(x => x.seat === seat);
+          if(p && !p.isBot) creditWin(p.userId, bootBack).catch(()=>{});
+        }
+        table.players = table.players.filter(x => x.seat !== seat);
+        table.pot -= bootBack;
+        delete table.puts[seat];
+        if(table.players.length === 0){
+          if(table.startTimeout) clearTimeout(table.startTimeout);
+          teenTables.delete(tableId);
+        }
+      } else if(table && table.started && table.active[seat]){
         table.active[seat] = false;
         io.to(tableId).emit('teenpatti:player-packed', { userId: seat, name: seat, reason:'DISCONNECT' });
         clearTeenTimer(table);
@@ -1195,4 +1215,4 @@ initDatabase().then(() => {
     console.log(`Server on ${PORT} - PUBLIC SECURE`);
     startAviator();
   });
-});
+});      
