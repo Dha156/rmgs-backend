@@ -13,7 +13,7 @@ const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
-
+app.set('trust proxy', 1);
 // ===== 1. CORS LOCK - PUBLIC KE LIYE SIRF TERI SITE + TIINY PREVIEW =====
 const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || 'https://royalcasino.tiiny.site').split(',').map(s => s.trim());
 console.log('Allowed Origins:', ALLOWED_ORIGINS);
