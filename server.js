@@ -125,8 +125,60 @@ function checkAdmin(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ success: false, message: 'Admin login chahiye' });
   try {
-    const d = jwt.verify(token, process.env
-  const r = await pool.query('SELECT is_blocked, self_excluded_until FROM wallets WHERE user_id=$1', [userId]);
+    const d = jwt.verify(token, process.env.JWT_SECRET);
+    if (d.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin nahi ho' });
+    req.admin = d; next();
+  } catch(e){ return res.status(401).json({ success: false, message: 'Admin token galat hai' }); }
+}
+async function audit(actor, action, details, ip) {
+  try { await pool.query('INSERT INTO audit_logs (actor_id, action_type, details, ip_address) VALUES ($1,$2,$3,$4)', [actor, action, details, ip]); } catch(e){}
+}
+async function initDatabase() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS wallets (id SERIAL PRIMARY KEY, user_id VARCHAR(255) UNIQUE NOT NULL, balance NUMERIC(12,2) DEFAULT 0 CHECK(balance>=0), vip_level INT DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW(), dob DATE, is_blocked BOOLEAN DEFAULT false, self_excluded_until TIMESTAMP, daily_deposit NUMERIC(12,2) DEFAULT 0, daily_deposit_date DATE DEFAULT CURRENT_DATE)`);
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vip_level INTEGER DEFAULT 0;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS dob DATE;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT false;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS self_excluded_until TIMESTAMP;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit NUMERIC(12,2) DEFAULT 0;`).catch(()=>{});
+  await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit_date DATE DEFAULT CURRENT_DATE;`).catch(()=>{});
+  await pool.query(`CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, type VARCHAR(50) NOT NULL, status VARCHAR(50) NOT NULL, utr VARCHAR(100), created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS deposits (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, utr VARCHAR(100) UNIQUE NOT NULL, status VARCHAR(20) DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS withdraws (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, method VARCHAR(20) DEFAULT 'UPI', upi_id VARCHAR(255), account_no VARCHAR(50), ifsc VARCHAR(20), status VARCHAR(20) DEFAULT 'PENDING', created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS admin_users (id SERIAL PRIMARY KEY, username VARCHAR(100) UNIQUE NOT NULL, password_hash VARCHAR(255) NOT NULL, role VARCHAR(50) DEFAULT 'admin')`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS audit_logs (id SERIAL PRIMARY KEY, actor_id VARCHAR(255) NOT NULL, action_type VARCHAR(100) NOT NULL, details TEXT, ip_address VARCHAR(50), created_at TIMESTAMP DEFAULT NOW())`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS settings (key VARCHAR(100) PRIMARY KEY, value TEXT NOT NULL)`);
+  await pool.query(`INSERT INTO settings (key, value) VALUES ('global_rtp','96'), ('min_bet','10'), ('max_bet','5000'), ('teenpatti_rake','5'), ('teenpatti_boot','5'), ('aviator_house_edge','4'), ('aviator_min_crash','1.10'), ('aviator_max_crash','100'), ('spin_rtp','96'), ('dragontiger_rtp','96'), ('roulette_rtp','96'), ('mines_rtp','96'), ('andarbahar_rtp','96'), ('plinko_rtp','96'), ('baccarat_rtp','96'), ('poker_rtp','96'), ('slots_rtp','96'), ('colour_rtp','96'), ('chicken_rtp','96'), ('fortunegems_rtp','96'), ('gemstemple_rtp','96') ON CONFLICT (key) DO NOTHING`);
+  try {
+    const adminUser = process.env.ADMIN_USERNAME || 'admin';
+    const adminPass = process.env.ADMIN_PASSWORD;
+    if (adminPass) {
+      const ex = await pool.query('SELECT * FROM admin_users WHERE username=$1', [adminUser]);
+      if (!ex.rows.length) {
+        const hash = await bcrypt.hash(adminPass, 12);
+        await pool.query('INSERT INTO admin_users (username, password_hash, role) VALUES ($1,$2,\'admin\')', [adminUser, hash]);
+        console.log('✅ Admin bana diya:', adminUser);
+      }
+    } else { console.log('⚠️ ADMIN_PASSWORD env nahi dala - Admin login nahi hoga'); }
+  } catch(e){ console.log('Admin create error', e.message); }
+  console.log('DB Ready - PUBLIC SECURE FIXED - 15 GAMES!');
+}
+async function getSetting(key, def) {
+  const r = await pool.query('SELECT value FROM settings WHERE key=$1', [key]);
+  return r.rows.length ? parseFloat(r.rows[0].value) : def;
+}
+function is18Plus(dobStr) {
+  if (!dobStr) return false;
+  let dob = new Date(dobStr);
+  let today = new Date();
+  let age = today.getFullYear() - dob.getFullYear();
+  let m = today.getMonth() - dob.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+  return age >= 18;
+}
+async function checkBlocked(userId) {
+    const r = await pool.query('SELECT is_blocked, self_excluded_until FROM wallets WHERE user_id=$1', [userId]);
   if (!r.rows.length) return { blocked: false };
   if (r.rows[0].is_blocked) return { blocked: true, reason: 'Admin ne block kiya hai' };
   if (r.rows[0].self_excluded_until && new Date(r.rows[0].self_excluded_until) > new Date()) return { blocked: true, reason: 'Tune khud ko Self-Exclusion me dala hai till ' + r.rows[0].self_excluded_until };
@@ -366,7 +418,7 @@ app.get('/api/admin/pending-withdraws', checkAdmin, async (req, res) => {
 
 // ===== FIX 3: Withdraw Approve / Reject + Refund =====
 app.post('/api/admin/handle-withdraw', checkAdmin, async (req, res) => {
-   const { withdrawId, approve } = req.body;
+    const { withdrawId, approve } = req.body;
   const c = await pool.connect();
   try {
     await c.query('BEGIN');
@@ -597,256 +649,6 @@ io.on('connection', (socket) => {
       let timedOut = t.order[t.turnIdx];
       t.active[timedOut] = false;
             io.to(tableId).emit('teenpatti:player-packed', { userId: timedOut, reason:'TIMEOUT', name: timedOut });
-      let alive = Object.values(t.active).filter(Boolean).length;
-      if(alive <= 1) return teenFinishGame(tableId);
-      for(let i=0;i<5;i++){ t.turnIdx = (t.turnIdx+1)%5; if(t.active[t.order[t.turnIdx]]) break; }
-      startTeenTurnTimer(tableId);
-    }, 10000);
-  }
-  function teenNextTurn(tableId){
-    let table = teenTables.get(tableId); if(!table) return;
-    let alive = Object.values(table.active).filter(Boolean).length;
-    if(alive <= 1) return teenFinishGame(tableId);
-    for(let i=0;i<10;i++){ table.turnIdx = (table.turnIdx+1)%table.order.length; if(table.active[table.order[table.turnIdx]]) break; }
-    startTeenTurnTimer(tableId);
-  }
-  async function teenFinishGame(tableId){
-    let table = teenTables.get(tableId); if(!table) return;
-    clearTeenTimer(table);
-    if(table.startTimeout) clearTimeout(table.startTimeout);
-    let best=null, bestScore=-1;
-    for(let name of table.order){
-      if(!table.active[name]) continue;
-      let s = tpEvaluate(table.cardsMap[name]).score;
-      if(s > bestScore){ bestScore=s; best=name; }
-    }
-    if(!best){ teenTables.delete(tableId); return; }
-    const rakePercent = await getSetting('teenpatti_rake', 5);
-    const totalPot = table.pot;
-    // FIXED: Bot ka paisa nakli hai - winner ko sirf HUMAN puts milenge
-    let humanPot = 0;
-    for (let pl of table.players) { if (!pl.isBot) humanPot += (table.puts[pl.seat] || 0); }
-    const rake = Math.floor(humanPot * rakePercent / 100);
-    const winnerAmount = Math.max(0, humanPot - rake);
-    let winnerPlayer = table.players.find(p=>p.seat===best);
-    if(winnerPlayer && !winnerPlayer.isBot) await creditWin(winnerPlayer.userId, winnerAmount);
-    if (rake > 0) await pool.query(`INSERT INTO wallets (user_id, balance) VALUES ('HOUSE_ACCOUNT', $1) ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $1`, [rake]); // FIXED: rake sirf humanPot pe
-    io.to(tableId).emit('teenpatti:winner', { winner: best, winnerId: best, totalPot, rake, rakePercent, winnerGot: winnerAmount, puts: table.puts, allCards: table.order.map(n=>({ name:n, cards: table.cardsMap[n], hand: tpEvaluate(table.cardsMap[n]).name })) });
-    // FRONTEND COMPAT: purana frontend teenpatti:showdown / result bhi sunta hai
-    io.to(tableId).emit('teenpatti:showdown', { winner: best, hands: Object.fromEntries(table.order.map(n=>[n, table.cardsMap[n]])) });
-    teenTables.delete(tableId);
-  }
-  socket.on('teenpatti:join', async (data) => {
-    const tableId = data.tableId || 'table1';
-    const isWatch = !!data.watch;
-    const boot = await getSetting('teenpatti_boot', 5);
-    let table = getOrCreateTeenTable(tableId, boot);
-    if(isWatch){
-      socket.join(tableId);
-      table.watchers.push({ socketId: socket.id, userId });
-      socket.emit('teenpatti:waiting', { message: 'Watch Mode - Real Game dekh rahe ho', pot: table.pot, boot, puts: table.puts });
-      if(table.started){
-        socket.emit('teenpatti:game-started', { pot: table.pot, blind: table.blind, seen: table.blind*2, turn: table.order[table.turnIdx], puts: table.puts });
-        socket.emit('teenpatti:turn', { turn: table.order[table.turnIdx], blind: table.blind, seen: table.blind*2, pot: table.pot, puts: table.puts, time: 10 });
-      }
-      return;
-    }
-    if(table.started) return socket.emit('game:error', { message: 'Game chal rahi hai, agle game me aao - 5 sec wait' });
-    if(table.players.find(p=>p.userId===userId)) return socket.emit('game:error', { message: 'Pehle se table me ho' });
-    if(table.players.length >= 5) return socket.emit('game:error', { message: 'Table full hai, agle game me aao' });
-    const tx = await placeBet(userId, boot);
-    if(!tx.success) return socket.emit('game:error', { message: tx.error });
-    let seatName = 'P' + (table.players.length+1);
-    table.players.push({ socketId: socket.id, userId, seat: seatName, isBot:false, status:'ACTIVE' });
-    table.puts[seatName] = boot;
-    table.currentChaal = boot;
-    teenRecalcPot(table);
-    socket.join(tableId);
-    socket.data.teenSeat = seatName;
-    socket.data.teenTable = tableId;
-    socket.emit('teenpatti:waiting', { message: 'New Game 5 sec me start hoga...', pot: table.pot, boot, puts: table.puts, seat: seatName });
-    // FRONTEND COMPAT: purana frontend joined sunta hai
-    socket.emit('teenpatti:joined', { pot: table.pot, seat: seatName, message: 'Table Join ho gaya' });
-    if(table.players.length===1 && !table.startTimeout){
-      table.startTimeout = setTimeout(()=>{
-        let t = teenTables.get(tableId); if(!t || t.started) return;
-        t.started = true;
-        const botNames = ['Vikram','Rahul','Apurbo','Bapan'];
-        let botIdx = 0;
-        while(t.players.length < 5){
-          let bSeat = 'BOT_' + botNames[botIdx];
-          t.players.push({ socketId:'BOT_'+bSeat, userId:'BOT_'+bSeat, seat: bSeat, isBot:true, status:'ACTIVE' });
-          t.puts[bSeat] = boot;
-          teenRecalcPot(t);
-          botIdx++;
-        }
-        t.order = t.players.map(p=>p.seat);
-        t.order.forEach(name=>{ t.active[name]=true; t.seenMap[name]=false; });
-        let deck = shuffleDeck().map(tpCardFormat);
-        let idx=0;
-        t.order.forEach(name=>{ t.cardsMap[name] = [deck[idx++], deck[idx++], deck[idx++]]; });
-        t.players.forEach(p=>{
-          if(!p.isBot){
-            io.to(p.socketId).emit('teenpatti:cards', { myCards: t.cardsMap[p.seat], cards: t.cardsMap[p.seat], pot: t.pot, boot: t.blind, puts: t.puts, seat: p.seat, players: t.order });
-          }
-        });
-        io.to(tableId).emit('teenpatti:game-started', { pot: t.pot, blind: t.currentChaal, seen: t.currentChaal*2, currentChaal: t.currentChaal, turn: t.order[0], puts: t.puts, order: t.order });
-        t.turnIdx = 0;
-        startTeenTurnTimer(tableId);
-      }, 5000);
-    } else {
-      io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.blind, seen: table.blind*2, puts: table.puts });
-    }
-  });
-  function getMySeat(socket, tableId){
-    if(socket.data.teenSeat) return socket.data.teenSeat;
-    let table = teenTables.get(tableId); if(!table) return null;
-    let p = table.players.find(x=>x.socketId===socket.id);
-    return p ? p.seat : null;
-  }
-  socket.on('teenpatti:seen', async (data)=>{
-    const tableId = data.tableId || 'table1';
-    let table = teenTables.get(tableId); if(!table) return;
-    let seat = getMySeat(socket, tableId); if(!seat) return;
-    table.seenMap[seat] = true;
-    socket.emit('teenpatti:seen-ok', { seenAmount: table.currentChaal*2, blind: table.currentChaal, currentChaal: table.currentChaal, seat });
-    socket.emit('teenpatti:seen', { cards: table.cardsMap[seat], myCards: table.cardsMap[seat] });
-  });
-  socket.on('teenpatti:chaal', async (data) => {
-    const tableId = data.tableId || 'table1';
-    let table = teenTables.get(tableId); if(!table) return;
-    let seat = getMySeat(socket, tableId); if(!seat) return socket.emit('game:error', { message: 'Table me nahi ho' });
-    if(table.order[table.turnIdx] !== seat) return socket.emit('game:error', { message: 'Abhi teri baari nahi hai' });
-    let expected = teenCost(table, seat);
-    let chaalAmt = parseFloat(data.amount);
-    if(chaalAmt !== expected) return socket.emit('game:error', { message: `Galat amount! Abhi chaal ₹${table.currentChaal} hai, tujhe ₹${expected} dena hai` });
-    const tx = await placeBet(userId, chaalAmt);
-    if(!tx.success) return socket.emit('game:error', { message: tx.error });
-    table.puts[seat] = (table.puts[seat]||0) + chaalAmt;
-    teenRecalcPot(table);
-    table.lastAction = { userId: seat, action: table.seenMap[seat]?'CHAAL':'BLIND', amount: chaalAmt, totalPut: table.puts[seat] };
-    io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.currentChaal, seen: table.currentChaal*2, currentChaal: table.currentChaal, puts: table.puts, lastAction: table.lastAction });
-    clearTeenTimer(table);
-    teenNextTurn(tableId);
-  });
-  // FRONTEND COMPAT: Frontend teenpatti:blind bhejta hai, Backend blind2 sunta tha - dono sunenge
-  async function handleBlind2(socket, data){
-    const tableId = data.tableId || 'table1';
-    let table = teenTables.get(tableId); if(!table) return;
-    let seat = getMySeat(socket, tableId); if(!seat) return;
-    if(table.order[table.turnIdx] !== seat) return socket.emit('game:error', { message: 'Teri baari nahi hai' });
-    table.currentChaal = table.currentChaal * 2;
-    let cost = teenCost(table, seat);
-    const tx = await placeBet(userId, cost);
-    if(!tx.success) return socket.emit('game:error', { message: tx.error });
-    table.puts[seat] = (table.puts[seat]||0) + cost;
-    teenRecalcPot(table);
-    io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.currentChaal, seen: table.currentChaal*2, currentChaal: table.currentChaal, puts: table.puts, lastAction:{ userId: seat, action:'BLIND x2', amount:cost, totalPut: table.puts[seat] } });
-    clearTeenTimer(table);
-    teenNextTurn(tableId);
-  }
-  socket.on('teenpatti:blind2', async (data)=>{ await handleBlind2(socket, data); });
-  socket.on('teenpatti:blind', async (data)=>{ await handleBlind2(socket, data); });
-
-  socket.on('teenpatti:pack', async (data) => {
-    const tableId = data.tableId || 'table1';
-    let table = teenTables.get(tableId); if(!table) return;
-    let seat = getMySeat(socket, tableId); if(!seat) return;
-    if(table.order[table.turnIdx] !== seat) return socket.emit('game:error', { message: 'Teri baari nahi hai, Pack nahi kar sakta' });
-    if(!table.active[seat]) return;
-    table.active[seat] = false;
-    io.to(tableId).emit('teenpatti:player-packed', { userId: seat, name: seat });
-    clearTeenTimer(table);
-    teenNextTurn(tableId);
-  });
-  socket.on('teenpatti:sideshow', async (data)=>{
-    const tableId = data.tableId || 'table1';
-    let table = teenTables.get(tableId); if(!table) return;
-    let seat = getMySeat(socket, tableId); if(!seat) return;
-    if(table.order[table.turnIdx] !== seat) return socket.emit('game:error', { message: 'Side Show apni baari me hi hoga' });
-    let opp = data.opp;
-    if(opp && !table.order.includes(opp)){
-      let found = table.players.find(p=>p.seat.includes(opp) || opp.includes(p.seat));
-      if(found) opp = found.seat;
-    }
-    if(!opp) {
-      let idx = table.order.indexOf(seat);
-      for(let k=1;k<5;k++){ let n = table.order[(idx - k + table.order.length)%table.order.length]; if(table.active[n]){ opp=n; break; } }
-    }
-    if(!opp || !table.active[opp]) return socket.emit('game:error', { message: 'Wo player Pack ho chuka hai' });
-    if(!table.seenMap[seat]) return socket.emit('game:error', { message: 'Side Show ke liye pehle SEE dabao' });
-    let cost = table.currentChaal*2;
-    const tx = await placeBet(userId, cost);
-    if(!tx.success) return socket.emit('game:error', { message: tx.error });
-    table.puts[seat] = (table.puts[seat]||0) + cost;
-    teenRecalcPot(table);
-    let myRank = tpEvaluate(table.cardsMap[seat]);
-    let oppRank = tpEvaluate(table.cardsMap[opp]);
-    let meWin = myRank.score > oppRank.score;
-    if(myRank.score===oppRank.score){
-      let myMax = Math.max(...table.cardsMap[seat].map(c=>{ let r=c.replace(/[♠♥♦♣]/g,''); return r==='A'?14:r==='K'?13:r==='Q'?12:r==='J'?11:parseInt(r); }));
-      let oppMax = Math.max(...table.cardsMap[opp].map(c=>{ let r=c.replace(/[♠♥♦♣]/g,''); return r==='A'?14:r==='K'?13:r==='Q'?12:r==='J'?11:parseInt(r); }));
-      meWin = myMax > oppMax;
-    }
-    let loser = meWin ? opp : seat;
-    table.active[loser] = false;
-    socket.emit('teenpatti:sideshow-private', { you: table.cardsMap[seat], youRank: myRank.name, youScore: myRank.score, opp: table.cardsMap[opp], oppName: opp, oppRank: oppRank.name, oppScore: oppRank.score, winner: meWin?seat:opp, loser });
-    socket.to(tableId).emit('teenpatti:sideshow-done', { winner: meWin?seat:opp, loser, pot: table.pot, puts: table.puts });
-    io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.blind, seen: table.blind*2, puts: table.puts });
-    clearTeenTimer(table);
-    setTimeout(()=> teenNextTurn(tableId), 1000);
-  });
-  socket.on('teenpatti:show', async (data) => {
-    const tableId = data.tableId || 'table1';
-    let table = teenTables.get(tableId); if(!table) return;
-    let alive = Object.values(table.active).filter(Boolean).length;
-    if(alive > 2) return socket.emit('game:error', { message: 'Show ke liye 2 player hone chahiye, abhi Side Show lo' });
-    await teenFinishGame(tableId);
-  });
-
-  socket.on('dragontiger:bet', async (data) => {
-    const bet = parseFloat(data.betAmount);
-    const choice = data.choice;
-    if (!bet || bet < 10) return socket.emit('game:error', { message: 'Min Bet ₹10' });
-    if (!['DRAGON', 'TIGER', 'TIE'].includes(choice)) return socket.emit('game:error', { message: 'Dragon / Tiger / Tie chuno' });
-    const tx = await placeBet(userId, bet);
-    if (!tx.success) return socket.emit('game:error', { message: tx.error });
-    const deck = shuffleDeck();
-    const dCard = deck[0];
-    const tCard = deck[1];
-    const dVal = getRankValue(dCard);
-    const tVal = getRankValue(tCard);
-    let winner = dVal > tVal ? 'DRAGON' : tVal > dVal ? 'TIGER' : 'TIE';
-    let isWin = (choice === winner);
-    let multiplier = 1;
-    if (winner === 'TIE') multiplier = 8; else if (isWin) multiplier = 2;
-    let winnings = isWin ? bet * multiplier : 0;
-    let bal = tx.newBalance;
-    if (isWin) bal = await creditWin(userId, winnings);
-    socket.emit('dragontiger:result', { dragonCard: dCard, tigerCard: tCard, winner, choice, isWin, winnings, newBalance: bal });
-  });
-  socket.on('roulette:bet', async (data) => {
-    const bet = parseFloat(data.betAmount);
-    const choice = data.choice;
-    if (!bet || bet < 10) return socket.emit('game:error', { message: 'Min Bet ₹10' });
-    const tx = await placeBet(userId, bet);
-    if (!tx.success) return socket.emit('game:error', { message: tx.error });
-    const num = fairRandom(37);
-    let color = num === 0 ? 'GREEN' : [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36].includes(num) ? 'RED' : 'BLACK';
-    let isWin = false; let multiplier = 0;
-    if (choice === 'RED' && color === 'RED') { isWin = true; multiplier = 2; }
-    if (choice === 'BLACK' && color === 'BLACK') { isWin = true; multiplier = 2; }
-    if (choice === 'GREEN' && color === 'GREEN') { isWin = true; multiplier = 14; }
-    if (!isNaN(parseInt(choice)) && parseInt(choice) === num) { isWin = true; multiplier = 36; }
-    let winnings = isWin ? bet * multiplier : 0;
-    let bal = tx.newBalance;
-    if (isWin) bal = await creditWin(userId, winnings);
-    socket.emit('roulette:result', { number: num, color, choice, isWin, winnings, newBalance: bal });
-  });
-  socket.on('mines:play', async (data) => {
-    const bet = parseFloat(data.betAmount);
-    const minesCount = parseInt(data.mines) || 3;
-          io.to(tableId).emit('teenpatti:player-packed', { userId: timedOut, reason:'TIMEOUT', name: timedOut });
       let alive = Object.values(t.active).filter(Boolean).length;
       if(alive <= 1) return teenFinishGame(tableId);
       for(let i=0;i<5;i++){ t.turnIdx = (t.turnIdx+1)%5; if(t.active[t.order[t.turnIdx]]) break; }
