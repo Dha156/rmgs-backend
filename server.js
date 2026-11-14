@@ -1,4 +1,4 @@
-// ================= ROYAL CASINO - BACKEND SECURE V2 - PART 1 =================
+// ================= ROYAL CASINO - BACKEND SECURE V3 - FULL 15 GAMES - PART 1/6 =================
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -12,7 +12,7 @@ const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 if(!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32){
-  console.error('❌ JWT_SECRET missing ya chhota hai');
+  console.error('❌ JWT_SECRET missing ya chhota hai - Kam se kam 32 char ka hona chahiye');
   process.exit(1);
 }
 if(!process.env.DATABASE_URL){
@@ -22,15 +22,35 @@ if(!process.env.DATABASE_URL){
 const app = express();
 app.set('trust proxy', 1);
 
-const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || 'https://royalcasino.tiiny.site,https://royal-casino-club.vercel.app').split(',').map(s => s.trim());
+// --- CORS FIXED V3 - Koi bhi Vercel link block nahi hoga ---
+function cleanOrigin(s){
+  return String(s||'').trim().replace(/\/+$/,'').toLowerCase();
+}
+const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || 'https://royal-casino-club.vercel.app,https://royalcasino.tiiny.site').split(',').map(cleanOrigin).filter(Boolean);
+
 function isOriginAllowed(origin){
-  if(!origin) return false;
-  if(ALLOWED_ORIGINS.includes(origin)) return true;
-  if(origin.includes('localhost') && process.env.NODE_ENV !== 'production') return true;
+  if(!origin) return true; // Postman / Health check
+  const o = cleanOrigin(origin);
+  if(ALLOWED_ORIGINS.includes(o)) return true;
+  if(o.endsWith('.vercel.app')) return true; // Preview link bhi chalega
+  if(o.endsWith('.onrender.com')) return true;
+  if(o.includes('localhost') && process.env.NODE_ENV !== 'production') return true;
   return false;
 }
-app.use(cors({ origin: function(origin, cb){ if(isOriginAllowed(origin)) return cb(null, true); return cb(new Error('CORS Blocked')); }, credentials: true }));
-app.options('*', cors({ origin: function(origin, cb){ if(isOriginAllowed(origin)) return cb(null, true); return cb(new Error('CORS Blocked')); }, credentials: true }));
+
+function corsOptions(){
+  return {
+    origin: function(origin, cb){
+      if(isOriginAllowed(origin)) return cb(null, true);
+      console.log('❌ CORS Blocked Origin:', origin, 'Allowed:', ALLOWED_ORIGINS);
+      return cb(new Error('CORS Blocked: ' + origin));
+    },
+    credentials: true
+  };
+}
+
+app.use(cors(corsOptions()));
+app.options('*', cors(corsOptions()));
 app.use(express.json({ limit: '10kb' }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -41,14 +61,28 @@ app.use((req, res, next) => {
   res.setHeader('Content-Security-Policy', "default-src 'self'");
   next();
 });
+
 const otpLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, message: { success: false, message: 'Bahut zyada try kiya, 15 min baad try karo' } });
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { success: false, message: 'Bahut zyada login try, 15 min ruk' } });
 const apiLimiter = rateLimit({ windowMs: 60 * 1000, max: 60 });
 app.use('/api/', apiLimiter);
+
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: function(origin, cb){ if(isOriginAllowed(origin)) return cb(null, true); return cb(new Error('Socket CORS Blocked')); }, methods: ["GET","POST"], credentials: true } });
+const io = new Server(server, {
+  cors: {
+    origin: function(origin, cb){
+      if(isOriginAllowed(origin)) return cb(null, true);
+      console.log('❌ Socket CORS Blocked:', origin);
+      return cb(new Error('Socket CORS Blocked: ' + origin));
+    },
+    methods: ["GET","POST"],
+    credentials: true
+  }
+});
+
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
+// --- Helpers - Secure ---
 function cleanBet(v, min, max){
   let n = Number(v);
   if(!Number.isFinite(n)) return 0;
@@ -65,6 +99,7 @@ function cleanUpi(v){ return String(v||'').trim().toLowerCase().replace(/[^a-z0-
 function isValidUpi(v){ return /^[a-z0-9._-]{2,}@[a-z]{2,}$/i.test(String(v||'').trim()); }
 function isValidUtr(v){ return /^[0-9A-Za-z]{12}$/.test(String(v||'').trim()); }
 function isValidIfsc(v){ return /^[A-Z]{4}0[A-Z0-9]{6}$/.test(String(v||'').toUpperCase().trim()); }
+
 function socketRateLimit(socket, maxPerSec){
   let now = Date.now();
   socket.data._rl = socket.data._rl || [];
@@ -73,6 +108,7 @@ function socketRateLimit(socket, maxPerSec){
   socket.data._rl.push(now);
   return true;
 }
+
 function safeHttpsGet(url) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, (res) => {
@@ -84,12 +120,15 @@ function safeHttpsGet(url) {
     req.on('error', reject);
   });
 }
+
 function makeToken(mobile) { return jwt.sign({ mobile }, process.env.JWT_SECRET, { expiresIn: '1d' }); }
+
 function checkAuth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ success: false, message: 'Login karo pehle' });
   try { req.user = jwt.verify(token, process.env.JWT_SECRET); next(); } catch(e){ return res.status(401).json({ success: false, message: 'Token galat / expire ho gaya' }); }
 }
+
 function checkAdmin(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ success: false, message: 'Admin login chahiye' });
@@ -99,6 +138,7 @@ function checkAdmin(req, res, next) {
     req.admin = d; next();
   } catch(e){ return res.status(401).json({ success: false, message: 'Admin token galat hai' }); }
 }
+
 async function audit(actor, action, details, ip) {
   try { await pool.query('INSERT INTO audit_logs (actor_id, action_type, details, ip_address) VALUES ($1,$2,$3,$4)', [String(actor||'').slice(0,100), String(action||'').slice(0,100), String(details||'').slice(0,500), String(ip||'').slice(0,50)]); } catch(e){}
 }
@@ -112,19 +152,25 @@ const DAILY_BET_LIMIT = 20000;
 const MAX_BET = 5000;
 const MIN_BET = 10;
 
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vip_level INTEGER DEFAULT 0;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS balance NUMERIC(12,2) DEFAULT 0;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS dob DATE;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT false;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS self_excluded_until TIMESTAMP;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit NUMERIC(12,2) DEFAULT 0;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit_date DATE DEFAULT CURRENT_DATE;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS bonus_total NUMERIC(12,2) DEFAULT 0;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS welcome_claimed BOOLEAN DEFAULT false;`).catch(()=>{});
-pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS last_share_date DATE;`).catch(()=>{});
-pool.query(`CREATE TABLE IF NOT EXISTS referral_claims (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, code VARCHAR(50) NOT NULL, claimed_date DATE NOT NULL DEFAULT CURRENT_DATE, amount NUMERIC(12,2) NOT NULL, UNIQUE(user_id, claimed_date));`).catch(()=>{});
+async function initDb(){
+  try{
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS sig_level INTEGER DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vip_level INTEGER DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS balance NUMERIC(12,2) DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS dob DATE;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT false;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS self_excluded_until TIMESTAMP;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit NUMERIC(12,2) DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit_date DATE DEFAULT CURRENT_DATE;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS bonus_total NUMERIC(12,2) DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS welcome_claimed BOOLEAN DEFAULT false;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS last_share_date DATE;`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS referral_claims (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, code VARCHAR(50) NOT NULL, claimed_date DATE NOT NULL DEFAULT CURRENT_DATE, amount NUMERIC(12,2) NOT NULL, UNIQUE(user_id, claimed_date));`);
+    console.log('✅ DB init ho gaya');
+  }catch(e){ console.log('DB init warning:', e.message); }
+}
+initDb();
 
 app.get('/fix-db', checkAdmin, async (req, res) => {
   try {
@@ -141,11 +187,12 @@ app.get('/fix-db', checkAdmin, async (req, res) => {
     res.json({ success: true, message: 'HO GAYA!' });
   } catch(e){ res.status(500).json({ success: false, message: 'DB fix fail' }); }
 });
+
 app.get('/api/payment-info', (req, res) => {
   res.json({ success: true, upi_id: MY_UPI_ID, upi_name: MY_UPI_NAME, min_deposit: MY_MIN_DEPOSIT, min_withdraw: MY_MIN_WITHDRAW, daily_deposit_limit: DAILY_DEPOSIT_LIMIT, message: `Min Deposit ₹${MY_MIN_DEPOSIT} | Min Withdraw ₹${MY_MIN_WITHDRAW} | Daily Deposit Limit ₹${DAILY_DEPOSIT_LIMIT}` });
 });
-app.get('/api/health', (req, res) => { res.json({ success: true, msg: 'Backend ON hai - Secure V2', time: new Date().toISOString() }); });
-app.get('/', (req, res) => { res.send('FULL CASINO Running - SECURE V2'); });
+app.get('/api/health', (req, res) => { res.json({ success: true, msg: 'Backend ON hai - Secure V3 Full 15 Games', time: new Date().toISOString() }); });
+app.get('/', (req, res) => { res.send('FULL CASINO Running - SECURE V3 - 15 GAMES'); });
 
 async function checkBlocked(userId) {
   const r = await pool.query('SELECT is_blocked, self_excluded_until FROM wallets WHERE user_id=$1', [String(userId||'').slice(0,20)]);
@@ -154,6 +201,7 @@ async function checkBlocked(userId) {
   if (r.rows[0].self_excluded_until && new Date(r.rows[0].self_excluded_until) > new Date()) return { blocked: true, reason: 'Self-Exclusion me ho till ' + r.rows[0].self_excluded_until };
   return { blocked: false };
 }
+
 async function placeBet(userId, betAmount) {
   let bet = cleanBet(betAmount, MIN_BET, MAX_BET);
   if(!bet) return { success: false, error: `Bet ₹${MIN_BET} se ₹${MAX_BET} ke beech rakho` };
@@ -173,6 +221,7 @@ async function placeBet(userId, betAmount) {
     return { success: true, newBalance: parseFloat(w.rows[0].balance) - bet, bet };
   } catch(e){ try{ await c.query('ROLLBACK'); }catch(_){} return { success: false, error: e.message }; } finally { c.release(); }
 }
+
 async function creditWin(userId, winnings) {
   let win = Number(winnings);
   if(!Number.isFinite(win) || win <= 0) return 0;
@@ -188,10 +237,14 @@ async function creditWin(userId, winnings) {
     return parseFloat(r.rows[0].balance);
   } catch(e){ try{ await c.query('ROLLBACK'); }catch(_){} throw e; } finally { c.release(); }
 }
+
 async function getSetting(key, def) {
-  const r = await pool.query('SELECT value FROM settings WHERE key=$1', [String(key).slice(0,50)]);
-  return r.rows.length ? parseFloat(r.rows[0].value) : def;
+  try{
+    const r = await pool.query('SELECT value FROM settings WHERE key=$1', [String(key).slice(0,50)]);
+    return r.rows.length ? parseFloat(r.rows[0].value) : def;
+  }catch(e){ return def; }
 }
+
 function is18Plus(dobStr) {
   if (!dobStr) return false;
   let dob = new Date(dobStr);
@@ -203,6 +256,9 @@ function is18Plus(dobStr) {
   if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
   return age >= 18;
 }
+
+// --- PART 1 KHATAM - Ab PART 2 yaha se shuru hoga ---
+// ================= PART 2 / 6 - DEPOSIT + WITHDRAW + OTP + ADMIN =================
 // ===== DEPOSIT CREATE QR - FRONTEND COMPAT + STRICT =====
 async function handleDepositCreateQR(req, res){
   const depositAmount = cleanBet(req.body.amount, MY_MIN_DEPOSIT, 50000);
@@ -220,7 +276,8 @@ async function handleDepositCreateQR(req, res){
 }
 app.post('/api/deposit/create-qr', checkAuth, handleDepositCreateQR);
 app.post('/api/wallet/deposit-create-qr', checkAuth, handleDepositCreateQR);
-// ===== DEPOSIT REQUEST - FRONTEND + BACKEND DONO NAAM CHALENGE - UTR 12 DIGIT STRICT =====
+
+// ===== DEPOSIT REQUEST - UTR 12 DIGIT STRICT =====
 async function handleDepositRequest(req, res){
   const amount = cleanBet(req.body.amount, MY_MIN_DEPOSIT, 50000);
   if(!amount) return res.status(400).json({ success: false, message: `Min ₹${MY_MIN_DEPOSIT} - Max ₹50000` });
@@ -242,7 +299,8 @@ async function handleDepositRequest(req, res){
 app.post('/api/wallet/deposit-request', checkAuth, handleDepositRequest);
 app.post('/api/deposit/request', checkAuth, handleDepositRequest);
 app.post('/api/deposit-request', checkAuth, handleDepositRequest);
-// ===== WITHDRAW - FRONTEND + BACKEND DONO NAAM - UPI / IFSC STRICT =====
+
+// ===== WITHDRAW - UPI / IFSC STRICT =====
 async function handleWithdraw(req, res){
   const amount = cleanBet(req.body.amount, MY_MIN_WITHDRAW, 50000);
   if(!amount) return res.status(400).json({ success: false, message: `Min ₹${MY_MIN_WITHDRAW} - Max ₹50000` });
@@ -278,7 +336,8 @@ async function handleWithdraw(req, res){
 app.post('/api/wallet/withdraw', checkAuth, handleWithdraw);
 app.post('/api/withdraw/request', checkAuth, handleWithdraw);
 app.post('/api/withdraw-request', checkAuth, handleWithdraw);
-    // ================= SERVER SECURE - PART 3 - OTP + ADMIN + BONUS =================
+
+// ================= DB TABLES + SETTINGS =================
 async function initDatabase() {
   await pool.query(`CREATE TABLE IF NOT EXISTS wallets (id SERIAL PRIMARY KEY, user_id VARCHAR(255) UNIQUE NOT NULL, balance NUMERIC(12,2) DEFAULT 0 CHECK(balance>=0), vip_level INT DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW(), dob DATE, is_blocked BOOLEAN DEFAULT false, self_excluded_until TIMESTAMP, daily_deposit NUMERIC(12,2) DEFAULT 0, daily_deposit_date DATE DEFAULT CURRENT_DATE, bonus_total NUMERIC(12,2) DEFAULT 0, welcome_claimed BOOLEAN DEFAULT false, last_share_date DATE)`);
   await pool.query(`CREATE TABLE IF NOT EXISTS transactions (id SERIAL PRIMARY KEY, user_id VARCHAR(255) NOT NULL, amount NUMERIC(12,2) NOT NULL, type VARCHAR(50) NOT NULL, status VARCHAR(50) NOT NULL, utr VARCHAR(100), created_at TIMESTAMP DEFAULT NOW())`);
@@ -300,8 +359,10 @@ async function initDatabase() {
       }
     } else { console.log('⚠️ ADMIN_PASSWORD 10+ char ka nahi dala - Admin login nahi hoga'); }
   } catch(e){ console.log('Admin create error'); }
-  console.log('DB Ready - SECURE V2');
+  console.log('DB Ready - SECURE V3');
 }
+initDatabase();
+
 const otpStore = new Map();
 app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
   const mobile = String(req.body.mobile||'').replace(/[^0-9]/g,'').slice(0,10);
@@ -322,6 +383,7 @@ app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
     } else res.status(400).json({ success: false, message: 'OTP nahi bheja gaya' });
   } catch(e){ console.error('OTP send fail'); res.status(500).json({ success: false, message: 'OTP fail - dobara try karo' }); }
 });
+
 app.post('/api/auth/verify-otp', loginLimiter, async (req, res) => {
   const mobile = String(req.body.mobile||'').replace(/[^0-9]/g,'').slice(0,10);
   const otp = String(req.body.otp||'').replace(/[^0-9]/g,'').slice(0,6);
@@ -345,21 +407,25 @@ app.post('/api/auth/verify-otp', loginLimiter, async (req, res) => {
     res.json({ success: true, token, user: { mobile, balance: w.rows[0].balance, vip_level: w.rows[0].vip_level } });
   } catch(e){ console.error('OTP verify fail'); res.status(500).json({ success: false, message: 'Login fail' }); }
 });
+
 app.post('/api/user/self-exclude', checkAuth, async (req, res) => {
   const h = [24, 168, 720].includes(parseInt(req.body.hours)) ? parseInt(req.body.hours) : 24;
   await pool.query('UPDATE wallets SET self_excluded_until = NOW() + ($1 || \' hours\')::interval WHERE user_id=$2', [h, req.user.mobile]);
   await audit(req.user.mobile, 'SELF_EXCLUDE', `Self excluded for ${h}h`, req.ip);
   res.json({ success: true, message: `Tune khud ko ${h} ghante ke liye band kar diya.` });
 });
+
 app.get('/api/wallet/balance', checkAuth, async (req, res) => {
   const r = await pool.query('SELECT balance, vip_level, is_blocked, self_excluded_until FROM wallets WHERE user_id=$1', [req.user.mobile]);
   if (!r.rows.length) return res.status(404).json({ success: false, message: 'Wallet nahi mila' });
   res.json({ success: true, balance: r.rows[0].balance, vip_level: r.rows[0].vip_level });
 });
+
 app.get('/api/wallet/history', checkAuth, async (req, res) => {
   const r = await pool.query('SELECT amount,type,status,created_at FROM transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 50', [req.user.mobile]);
   res.json({ success: true, history: r.rows });
 });
+
 app.post('/api/admin/login', loginLimiter, async (req, res) => {
   const username = String(req.body.username||'').slice(0,100);
   const password = String(req.body.password||'').slice(0,200);
@@ -372,6 +438,7 @@ app.post('/api/admin/login', loginLimiter, async (req, res) => {
   await audit(username, 'ADMIN_LOGIN', 'Login success', req.ip);
   res.json({ success: true, token });
 });
+
 app.post('/api/admin/approve-deposit', checkAdmin, async (req, res) => {
   const depositId = parseInt(req.body.depositId);
   const approve = req.body.approve === true || req.body.approve === 'true';
@@ -402,14 +469,17 @@ app.post('/api/admin/approve-deposit', checkAdmin, async (req, res) => {
     }
   } catch(e){ try{ await c.query('ROLLBACK'); }catch(_){} res.status(400).json({ success: false, message: e.message }); } finally { c.release(); }
 });
+
 app.get('/api/admin/pending-deposits', checkAdmin, async (req, res) => {
   const r = await pool.query('SELECT * FROM deposits WHERE status=\'PENDING\' ORDER BY created_at ASC LIMIT 100');
   res.json({ success: true, deposits: r.rows });
 });
+
 app.get('/api/admin/pending-withdraws', checkAdmin, async (req, res) => {
   const r = await pool.query('SELECT * FROM withdraws WHERE status=\'PENDING\' ORDER BY created_at ASC LIMIT 100');
   res.json({ success: true, withdraws: r.rows });
 });
+
 app.post('/api/admin/handle-withdraw', checkAdmin, async (req, res) => {
   const withdrawId = parseInt(req.body.withdrawId);
   const approve = req.body.approve === true || req.body.approve === 'true';
@@ -435,10 +505,12 @@ app.post('/api/admin/handle-withdraw', checkAdmin, async (req, res) => {
     }
   } catch(e){ try{ await c.query('ROLLBACK'); }catch(_){} res.status(400).json({ success: false, message: e.message }); } finally { c.release(); }
 });
+
 app.get('/api/admin/settings', checkAdmin, async (req, res) => {
   const r = await pool.query('SELECT * FROM settings');
   res.json({ success: true, settings: Object.fromEntries(r.rows.map(x => [x.key, x.value])) });
 });
+
 app.post('/api/admin/teenpatti-settings', checkAdmin, async (req, res) => {
   const { teenpatti_rake, teenpatti_boot } = req.body;
   if (teenpatti_rake !== undefined) {
@@ -453,6 +525,7 @@ app.post('/api/admin/teenpatti-settings', checkAdmin, async (req, res) => {
   }
   res.json({ success: true, message: 'Teen Patti Settings Save!' });
 });
+
 app.post('/api/admin/aviator-settings', checkAdmin, async (req, res) => {
   const { aviator_house_edge, aviator_min_crash, aviator_max_crash } = req.body;
   if (aviator_house_edge !== undefined) {
@@ -464,6 +537,7 @@ app.post('/api/admin/aviator-settings', checkAdmin, async (req, res) => {
   if (aviator_max_crash !== undefined) { const v = Number(aviator_max_crash); if(!Number.isFinite(v) || v < 10 || v > 500) return res.status(400).json({ success: false, message: 'Max Crash 10 se 500 ke beech' }); await pool.query(`INSERT INTO settings (key,value) VALUES ('aviator_max_crash',$1) ON CONFLICT (key) DO UPDATE SET value=$1`, [String(v)]); }
   res.json({ success: true, message: 'Aviator Settings Save!' });
 });
+
 app.post('/api/admin/spin-settings', checkAdmin, async (req, res) => {
   const { spin_rtp, min_bet, max_bet } = req.body;
   if (spin_rtp !== undefined) {
@@ -475,11 +549,13 @@ app.post('/api/admin/spin-settings', checkAdmin, async (req, res) => {
   if (max_bet !== undefined) { const v = cleanBet(max_bet, 100, 50000); if(!v) return res.status(400).json({ success: false, message: 'Max Bet 100-50000' }); await pool.query(`INSERT INTO settings (key,value) VALUES ('max_bet',$1) ON CONFLICT (key) DO UPDATE SET value=$1`, [String(v)]); }
   res.json({ success: true, message: 'Spin Settings Save!' });
 });
+
 app.post('/api/admin/casino-settings', checkAdmin, async (req, res) => {
   const map = { dragontiger_rtp: req.body.dragontiger_rtp, roulette_rtp: req.body.roulette_rtp, mines_rtp: req.body.mines_rtp, andarbahar_rtp: req.body.andarbahar_rtp, plinko_rtp: req.body.plinko_rtp, baccarat_rtp: req.body.baccarat_rtp, poker_rtp: req.body.poker_rtp, slots_rtp: req.body.slots_rtp, colour_rtp: req.body.colour_rtp, chicken_rtp: req.body.chicken_rtp, fortunegems_rtp: req.body.fortunegems_rtp, gemstemple_rtp: req.body.gemstemple_rtp };
   for (let k in map) { if (map[k] !== undefined) { const v = cleanBet(map[k], 80, 98); if (!v) continue; await pool.query(`INSERT INTO settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2`, [k, String(v)]); } }
   res.json({ success: true, message: 'Casino Games Save!' });
 });
+
 app.post('/api/admin/block-user', checkAdmin, async (req, res) => {
   const mobile = String(req.body.mobile||'').replace(/[^0-9]/g,'').slice(0,10);
   if(!/^[6-9]\d{9}$/.test(mobile)) return res.status(400).json({ success: false, message: 'Sahi mobile daalo' });
@@ -488,6 +564,7 @@ app.post('/api/admin/block-user', checkAdmin, async (req, res) => {
   await audit(req.admin.username, block ? 'BLOCK_USER' : 'UNBLOCK_USER', `User ${mobile}`, req.ip);
   res.json({ success: true, message: block ? 'User block kar diya' : 'User unblock kar diya' });
 });
+
 app.post('/api/bonus/welcome', checkAuth, async (req, res) => {
   const c = await pool.connect();
   try {
@@ -502,6 +579,7 @@ app.post('/api/bonus/welcome', checkAuth, async (req, res) => {
     res.json({ success: true, message: 'Welcome Bonus ₹50 mil gaya!', newBalance: b.rows[0].balance, bonus: b.rows[0].bonus_total });
   } catch(e){ try{ await c.query('ROLLBACK'); }catch(_){} res.status(400).json({ success: false, message: e.message }); } finally { c.release(); }
 });
+
 app.post('/api/referral/share', checkAuth, async (req, res) => {
   const code = String(req.body.code || '').replace(/[^A-Za-z0-9_-]/g,'').slice(0, 50);
   if (!code) return res.status(400).json({ success: false, message: 'Code chahiye' });
@@ -522,10 +600,13 @@ app.post('/api/referral/share', checkAuth, async (req, res) => {
     res.status(400).json({ success: false, message: e.message });
   } finally { c.release(); }
 });
+
 app.post('/api/teenpatti/settle', checkAuth, async (req, res) => {
   return res.status(400).json({ success: false, message: 'Local Teen Patti se settle nahi hoga. Real Money ke liye Server Table use karo.' });
 });
-    // ================= SERVER SECURE - PART 4 - AVIATOR + FAIR GAMES =================
+
+// --- PART 2 KHATAM - Ab PART 3 yaha se shuru hoga ---
+// ================= PART 3 / 6 - AVIATOR + FAIR GAMES + TEEN PATTI BASE =================
 function generateServerSeed() { return crypto.randomBytes(32).toString('hex'); }
 function hashSeed(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
 function fairOutcome(serverSeed, clientSeed, nonce) {
@@ -549,6 +630,7 @@ function getRankValue(card) {
   const map = { '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14 };
   return map[r] || 0;
 }
+
 let teenTables = new Map();
 let gameState = 'WAITING';
 let currentMultiplier = 1.00;
@@ -556,6 +638,7 @@ let crashPoint = 1.50;
 let roundTimer = 5;
 let roundId = 1;
 let aviatorBets = new Map();
+
 async function generateFunCrash() {
   const edge = await getSetting('aviator_house_edge', 4) / 100;
   const minC = await getSetting('aviator_min_crash', 1.10);
@@ -566,6 +649,7 @@ async function generateFunCrash() {
   if (crash > maxC) crash = maxC;
   return parseFloat(crash.toFixed(2));
 }
+
 function startAviator() {
   setInterval(async () => {
     if (gameState === 'WAITING') {
@@ -593,11 +677,13 @@ function startAviator() {
     }
   }, 500);
 }
+
 io.use((socket, next) => {
   const token = socket.handshake.auth?.token;
   if (!token) return next(new Error('Token chahiye'));
   try { socket.user = jwt.verify(token, process.env.JWT_SECRET); next(); } catch(e){ next(new Error('Token galat hai')); }
 });
+
 io.on('connection', (socket) => {
   const userId = socket.user.mobile;
   let serverSeed = generateServerSeed();
@@ -605,6 +691,8 @@ io.on('connection', (socket) => {
   let nonce = 1;
   socket.emit('provably-fair:init', { serverSeedHash: seedHash });
   socket.emit('game:state', { gameState, currentMultiplier, roundTimer, roundId });
+
+  // --- GAME 1 : SPIN ---
   socket.on('game:spin', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho, thoda ruk' });
     data = data || {};
@@ -626,6 +714,8 @@ io.on('connection', (socket) => {
     nonce++;
     if (nonce % 100 === 0) { const oldSeed = serverSeed; serverSeed = generateServerSeed(); seedHash = hashSeed(serverSeed); nonce = 1; socket.emit('provably-fair:init', { serverSeedHash: seedHash, revealedServerSeed: oldSeed }); }
   });
+
+  // --- GAME 2 : AVIATOR / CRASH ---
   socket.on('aviator:bet', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -638,6 +728,7 @@ io.on('connection', (socket) => {
     aviatorBets.set(socket.id, { userId, bet, cashedOut: false, cashoutLock: false, roundId });
     socket.emit('aviator:bet-placed', { bet, newBalance: tx.newBalance });
   });
+
   socket.on('aviator:cashout', async () => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     const b = aviatorBets.get(socket.id);
@@ -661,7 +752,8 @@ io.on('connection', (socket) => {
       return socket.emit('game:error', { message: e.message });
     }
   });
-    // ================= TEEN PATTI SECURE - PART 5 =================
+
+  // --- GAME 3 : TEEN PATTI - BASE FUNCTIONS ---
   function tpCardFormat(card){ if(!card) return card; if(String(card).includes('-')){ let p = String(card).split('-'); return p[1] + p[0]; } return String(card); }
   function tpEvaluate(cards){
     if(!cards || !Array.isArray(cards) || cards.length !== 3) return { score:0, name:'NO CARD' };
@@ -688,6 +780,7 @@ io.on('connection', (socket) => {
   function clearTeenTimer(table){ if(table.timer){ clearTimeout(table.timer); table.timer=null; } }
   function teenRecalcPot(table){ table.pot = Object.values(table.puts||{}).reduce((a,b)=>a+(parseFloat(b)||0),0); return table.pot; }
   function teenCost(table, seat){ return table.seenMap[seat] ? table.currentChaal*2 : table.currentChaal; }
+
   function teenBotAction(tableId){
     let table = teenTables.get(tableId); if(!table || !table.started) return;
     let who = table.order[table.turnIdx];
@@ -721,6 +814,7 @@ io.on('connection', (socket) => {
       teenNextTurn(tableId);
     }, 2000 + crypto.randomInt(0,2000));
   }
+
   function startTeenTurnTimer(tableId){
     let table = teenTables.get(tableId); if(!table) return;
     clearTeenTimer(table);
@@ -739,6 +833,7 @@ io.on('connection', (socket) => {
       startTeenTurnTimer(tableId);
     }, 10000);
   }
+
   function teenNextTurn(tableId){
     let table = teenTables.get(tableId); if(!table) return;
     let alive = Object.values(table.active).filter(Boolean).length;
@@ -746,6 +841,7 @@ io.on('connection', (socket) => {
     for(let i=0;i<10;i++){ table.turnIdx = (table.turnIdx+1)%table.order.length; if(table.active[table.order[table.turnIdx]]) break; }
     startTeenTurnTimer(tableId);
   }
+
   async function teenFinishGame(tableId){
     let table = teenTables.get(tableId); if(!table) return;
     clearTeenTimer(table);
@@ -770,6 +866,9 @@ io.on('connection', (socket) => {
     io.to(tableId).emit('teenpatti:showdown', { winner: best, hands: Object.fromEntries(table.order.map(n=>[n, table.cardsMap[n]])) });
     teenTables.delete(tableId);
   }
+
+  // --- PART 3 KHATAM - Ab PART 4 me Teen Patti Join / Chaal / Pack aayega ---
+        // --- TEEN PATTI JOIN - Part 3 ka aage ---
   socket.on('teenpatti:join', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -835,12 +934,14 @@ io.on('connection', (socket) => {
       io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.blind, seen: table.blind*2, puts: table.puts });
     }
   });
+
   function getMySeat(socket, tableId){
     if(socket.data.teenSeat) return socket.data.teenSeat;
     let table = teenTables.get(tableId); if(!table) return null;
     let p = table.players.find(x=>x.socketId===socket.id);
     return p ? p.seat : null;
   }
+
   socket.on('teenpatti:seen', async (data)=>{
     if(!socketRateLimit(socket, 5)) return;
     data = data || {};
@@ -852,6 +953,7 @@ io.on('connection', (socket) => {
     socket.emit('teenpatti:seen-ok', { seenAmount: table.currentChaal*2, blind: table.currentChaal, currentChaal: table.currentChaal, seat });
     socket.emit('teenpatti:seen', { cards: table.cardsMap[seat], myCards: table.cardsMap[seat] });
   });
+
   socket.on('teenpatti:chaal', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -872,6 +974,7 @@ io.on('connection', (socket) => {
     clearTeenTimer(table);
     teenNextTurn(tableId);
   });
+
   async function handleBlind2(socket, data){
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -895,6 +998,7 @@ io.on('connection', (socket) => {
   }
   socket.on('teenpatti:blind2', async (data)=>{ await handleBlind2(socket, data); });
   socket.on('teenpatti:blind', async (data)=>{ await handleBlind2(socket, data); });
+
   socket.on('teenpatti:pack', async (data) => {
     if(!socketRateLimit(socket, 5)) return;
     data = data || {};
@@ -908,6 +1012,7 @@ io.on('connection', (socket) => {
     clearTeenTimer(table);
     teenNextTurn(tableId);
   });
+
   socket.on('teenpatti:sideshow', async (data)=>{
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -936,13 +1041,13 @@ io.on('connection', (socket) => {
     }
     let loser = meWin ? opp : seat;
     table.active[loser] = false;
-    // FIXED: Opp ke cards AB NAHI bhejenge - sirf rank + winner. Pehle opp cards leak hote the.
     socket.emit('teenpatti:sideshow-private', { youRank: myRank.name, youScore: myRank.score, oppName: opp, oppRank: oppRank.name, oppScore: oppRank.score, winner: meWin?seat:opp, loser });
     socket.to(tableId).emit('teenpatti:sideshow-done', { winner: meWin?seat:opp, loser, pot: table.pot, puts: table.puts });
     io.to(tableId).emit('teenpatti:pot-update', { pot: table.pot, blind: table.blind, seen: table.blind*2, puts: table.puts });
     clearTeenTimer(table);
     setTimeout(()=> teenNextTurn(tableId), 1000);
   });
+
   socket.on('teenpatti:show', async (data) => {
     if(!socketRateLimit(socket, 5)) return;
     data = data || {};
@@ -954,7 +1059,8 @@ io.on('connection', (socket) => {
     if(alive > 2) return socket.emit('game:error', { message: 'Show ke liye 2 player hone chahiye, abhi Side Show lo' });
     await teenFinishGame(tableId);
   });
-    // ================= 12 GAMES SECURE - PART 6 =================
+
+  // ================= 12 GAMES - PART 4 AAGE =================
   socket.on('dragontiger:bet', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -976,6 +1082,7 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('dragontiger:result', { dragonCard: dCard, tigerCard: tCard, winner, choice, isWin, winnings, newBalance: bal });
   });
+
   socket.on('roulette:bet', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -999,6 +1106,7 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('roulette:result', { number: num, color, choice, isWin, winnings, newBalance: bal });
   });
+
   socket.on('mines:play', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1021,6 +1129,7 @@ io.on('connection', (socket) => {
     if (!hitMine) bal = await creditWin(userId, winnings);
     socket.emit('mines:result', { picked, hitMine, isWin: !hitMine, winnings, multiplier, newBalance: bal });
   });
+
   socket.on('andarbahar:bet', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1045,6 +1154,9 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('andarbahar:result', { joker, winner, choice, isWin, winnings, cards, newBalance: bal });
   });
+
+  // --- PART 4 KHATAM - Ab PART 5 me Plinko + Baccarat + Poker + Slots aayega ---
+        // --- GAME 8 : PLINKO ---
   socket.on('plinko:play', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1065,6 +1177,8 @@ io.on('connection', (socket) => {
     let bal = await creditWin(userId, winnings);
     socket.emit('plinko:result', { path, slot, multiplier: mult, winnings, newBalance: bal, risk });
   });
+
+  // --- GAME 9 : BACCARAT ---
   socket.on('baccarat:bet', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1088,6 +1202,8 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('baccarat:result', { playerCards: pCards, bankerCards: bCards, playerTotal: pTotal, bankerTotal: bTotal, winner, choice, isWin, winnings, newBalance: bal });
   });
+
+  // --- GAME 10 : POKER ---
   socket.on('poker:play', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1122,6 +1238,8 @@ io.on('connection', (socket) => {
     if (winnings > 0) bal = await creditWin(userId, winnings);
     socket.emit('poker:result', { myCards, botCards, myHand: myScore.name, botHand: botScore.name, isWin, isTie, winnings, newBalance: bal });
   });
+
+  // --- GAME 11 : SLOTS ---
   socket.on('slots:spin', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1141,6 +1259,8 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('slots:result', { reels: [r1, r2, r3], isWin, winName, multiplier: mult, winnings, newBalance: bal });
   });
+
+  // --- GAME 12 : COLOUR PREDICTION ---
   socket.on('colour:bet', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1167,6 +1287,8 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('colour:result', { number: num, color, size, target, isWin, winnings, multiplier: mult, newBalance: bal });
   });
+
+  // --- GAME 13 : CHICKEN ROAD ---
   socket.on('chicken:play', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1186,6 +1308,8 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('chicken:result', { steps: stepsWant, reached: isWin ? stepsWant : crashAt, isWin, multiplier: isWin ? mult : 0, winnings, newBalance: bal });
   });
+
+  // --- GAME 14 : FORTUNE GEMS ---
   socket.on('fortunegems:spin', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1206,6 +1330,8 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('fortunegems:result', { reels, isWin, winName, multiplier: mult, winnings, newBalance: bal });
   });
+
+  // --- GAME 15 : GEMS TEMPLE ---
   socket.on('gemstemple:spin', async (data) => {
     if(!socketRateLimit(socket, 5)) return socket.emit('game:error', { message: 'Bahut tez click kar rahe ho' });
     data = data || {};
@@ -1227,6 +1353,7 @@ io.on('connection', (socket) => {
     if (isWin) bal = await creditWin(userId, winnings);
     socket.emit('gemstemple:result', { reels, isWin, multiplier: mult, winnings, newBalance: bal });
   });
+
   socket.on('disconnect', () => {
     aviatorBets.delete(socket.id);
     if (socket.data.teenSeat && socket.data.teenTable) {
@@ -1253,13 +1380,23 @@ io.on('connection', (socket) => {
     }
   });
 });
-// ============ SERVER START - SECURE V2 ============
+
+// ============ SERVER START - SECURE V3 - FINAL ============
+// 404 + CORS Error Handler
+app.use((req, res) => {
+  res.status(404).json({ success:false, message:'Route nahi mila: ' + req.path });
+});
+app.use((err, req, res, next) => {
+  if(err && err.message && err.message.includes('CORS')){
+    console.log('CORS Error:', err.message, 'Origin:', req.headers.origin);
+    return res.status(403).json({ success:false, message:'CORS Blocked - FRONTEND_URL check karo', origin: req.headers.origin });
+  }
+  console.log('Server Error:', err.message);
+  return res.status(500).json({ success:false, message:'Server error' });
+});
+
 const PORT = process.env.PORT || 4000;
-initDatabase().then(() => {
-  server.listen(PORT, () => {
-    console.log(`Server on ${PORT} - SECURE V2 - All Games Locked`);
-    startAviator();
-  });
-}).catch((e)=>{ console.error('DB init fail'); process.exit(1); });
-
-
+server.listen(PORT, () => {
+  console.log(`🚀 Server on ${PORT} - SECURE V3 - All 15 Games Locked`);
+  startAviator();
+});
