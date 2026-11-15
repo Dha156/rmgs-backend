@@ -772,10 +772,91 @@ io.on('connection', (socket) => {
     socket.emit('game:result', { isWin: res.isWin, winnings: res.winnings, newBalance: res.newBalance, mines: minesCount });
   });
 
-  // ===== TEENPATTI JOIN - Frontend teenEnter() se aata hai =====
-  socket.on('teenpatti:join', () => {
-    socket.emit('game:result', { isWin: false, message: 'TeenPatti table join ho gaya - Bet lagao, settle server se hoga' });
-  });
+ // ================= TEENPATTI REAL - PART 2 - JOIN / BET / SHOW =================
+socket.on('teenpatti:join', async (data) => {
+  try{
+    const boot = parseInt(data?.boot);
+    if(!TEEN_BOOTS.includes(boot)) return socket.emit('teenpatti:error', { message: 'Galat Boot! 5,10,15,20,25,50,100 me se chuno' });
+    if(teenTables.has(mobile)) return socket.emit('teenpatti:error', { message: 'Pehle wala game khatam karo' });
+    const betRes = await placeBet(mobile, boot);
+    if(!betRes.success) return socket.emit('teenpatti:error', { message: betRes.message || 'Balance kam hai' });
+    const deck = teenDeck();
+    const botNames = ['Raju','Vikram'];
+    const players = [];
+    const myCards = deck.splice(0,3);
+    const myRank = teenRankHand(myCards);
+    players.push({ name:'You', mobile: mobile, isBot:false, cards: myCards, handScore: myRank.score, handName: myRank.name, packed:false, seen:false, betTotal: boot });
+    for(let i=0;i<2;i++){
+      const c = deck.splice(0,3);
+      const r = teenRankHand(c);
+      players.push({ name: botNames[i], mobile:'bot_'+i+'_'+mobile, isBot:true, cards:c, handScore:r.score, handName:r.name, packed:false, seen:false, betTotal: boot });
+    }
+    const table = { boot, pot: boot*3, round:1, turn:0, players, showdown:false, winner:null };
+    teenTables.set(mobile, table);
+    socket.emit('teenpatti:state', teenPublicTable(table, mobile));
+  }catch(e){ console.log('teen join err', e); socket.emit('teenpatti:error',{message:'Join fail ho gaya'}); }
+});
+socket.on('teenpatti:bet', async (data) => {
+  try{
+    const table = teenTables.get(mobile);
+    if(!table || table.showdown) return;
+    if(table.turn!==0) return socket.emit('teenpatti:error',{message:'Teri baari nahi hai'});
+    const me = table.players[0];
+    if(me.packed) return;
+    const type = data?.type;
+    if(type==='PACK'){ me.packed = true; }
+    else if(type==='SEEN'){ me.seen = true; }
+    else if(type==='BLIND' || type==='CHAAL'){
+      const amt = teenGetBet(table.boot, type);
+      const betRes = await placeBet(mobile, amt);
+      if(!betRes.success) return socket.emit('teenpatti:error',{message:'Balance kam hai'});
+      me.betTotal += amt; table.pot += amt;
+    } else return;
+    await teenRunBots(mobile, table);
+    await teenCheckEnd(mobile, table);
+    socket.emit('teenpatti:state', teenPublicTable(table, mobile));
+  }catch(e){ console.log('teen bet err', e); }
+});
+socket.on('teenpatti:show', async () => {
+  try{
+    const table = teenTables.get(mobile);
+    if(!table || table.showdown) return;
+    const me = table.players[0];
+    if(me.packed) return socket.emit('teenpatti:error',{message:'Tu Pack ho chuka hai'});
+    const amt = teenGetBet(table.boot, 'CHAAL');
+    const betRes = await placeBet(mobile, amt);
+    if(!betRes.success) return socket.emit('teenpatti:error',{message:'Balance kam hai'});
+    me.betTotal += amt; table.pot += amt;
+    table.showdown = true;
+    await teenFinish(mobile, table);
+    socket.emit('teenpatti:state', teenPublicTable(table, mobile));
+  }catch(e){ console.log('teen show err', e); }
+});
+socket.on('teenpatti:leave', () => { teenTables.delete(mobile); });
+async function teenRunBots(mobile, table){
+  for(let idx=1; idx<=2; idx++){
+    const bot = table.players[idx];
+    if(bot.packed || table.showdown) continue;
+    const r = Math.random();
+    if(bot.handScore < 210 && r < 0.4){ bot.packed = true; }
+    else { const amt = teenGetBet(table.boot, 'CHAAL'); bot.betTotal += amt; table.pot += amt; }
+  }
+  table.round++;
+  table.turn = 0;
+  if(table.round >= 4){ table.showdown = true; await teenFinish(mobile, table); }
+}
+async function teenCheckEnd(mobile, table){
+  const alive = table.players.filter(p=>!p.packed);
+  if(alive.length===1){ table.showdown = true; await teenFinish(mobile, table); }
+}
+async function teenFinish(mobile, table){
+  const alive = table.players.filter(p=>!p.packed);
+  alive.sort((a,b)=>b.handScore - a.handScore);
+  const win = alive[0];
+  table.winner = { name: win.name, handName: win.handName, isYou: win.mobile===mobile, pot: table.pot };
+  if(win.mobile===mobile){ await creditWin(mobile, table.pot); }
+  setTimeout(()=>{ teenTables.delete(mobile); }, 3000);
+}
 
   socket.on('disconnect', () => {
     console.log('Socket disconnected:', mobile);
