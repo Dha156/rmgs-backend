@@ -857,10 +857,14 @@ async function teenFinish(mobile, table){
   if(win.mobile===mobile){ await creditWin(mobile, table.pot); }
   setTimeout(()=>{ teenTables.delete(mobile); }, 3000);
 }
-
-  socket.on('disconnect', () => {
-    console.log('Socket disconnected:', mobile);
-  });
+socket.on('teenpatti:get-state', () => {
+  const table = teenTables.get(mobile);
+  if(table) socket.emit('teenpatti:state', teenPublicTable(table, mobile));
+});
+socket.on('disconnect', () => {
+  teenTables.delete(mobile);
+  console.log('Socket disconnected:', mobile);
+});
 });
 
 // --- PART 3 KHATAM - Ab PART 4 yaha se shuru hoga ---
