@@ -188,7 +188,7 @@ app.get('/fix-db', checkAdmin, async (req, res) => {
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS dob DATE;`);
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT false;`);
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS self_excluded_until TIMESTAMP;`);
-    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit NUMERIC(12,2) DEFAULT 0;`);
+        await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit NUMERIC(12,2) DEFAULT 0;`);
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit_date DATE DEFAULT CURRENT_DATE;`);
     res.json({ success: true, message: 'HO GAYA!' });
   } catch(e){ res.status(500).json({ success: false, message: 'DB fix fail' }); }
@@ -378,7 +378,7 @@ app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
   const dob = String(req.body.dob||'').slice(0,10);
   // Frontend: {name, mobile, dob} bhejta hai - name bhi save karo taaki verify me wapas de sake
   const reqName = String(req.body.name||'').slice(0,30);
-  if (!mobile || !/^[6-9]\d{9}$/.test(mobile)) return res.status(400).json({ success: false, message: 'Sahi 10 digit mobile daalo' });
+    if (!mobile || !/^[6-9]\d{9}$/.test(mobile)) return res.status(400).json({ success: false, message: 'Sahi 10 digit mobile daalo' });
   let w;
   try{ w = await pool.query('SELECT dob FROM wallets WHERE user_id=$1', [mobile]); }
   catch(e){ console.error('DB fail send-otp', e.message); return res.status(500).json({ success: false, message: 'Database down hai - thodi der baad try karo' }); }
@@ -562,17 +562,12 @@ app.post('/api/referral/share', checkAuth, async (req, res) => {
   }
 });
 
+// ===== FIXED: TeenPatti settle - Frontend se pot / isHumanWin ab nahi mana jayega =====
+// Pehle koi bhi pot=50000 + isHumanWin=true bhej ke free me paisa le leta tha. Ab ye route kuch credit nahi karta, sirf balance wapas deta hai. TeenPatti ab Free Play hai.
 app.post('/api/teenpatti/settle', checkAuth, async (req, res) => {
-  const pot = cleanBet(req.body.pot, 0, 50000);
-  const isHumanWin = req.body.isHumanWin === true;
-  if(!pot) return res.status(400).json({ success: false, message: 'Pot galat hai' });
-  if(!isHumanWin) return res.json({ success: true, message: 'Haar gaye - pot gaya' });
-  const rake = await getSetting('teenpatti_rake', 5);
-  const win = Math.floor(pot * (100 - rake) / 100);
-  const bal = await creditWin(req.user.mobile, win);
-  res.json({ success: true, win, balance: bal });
+  const r = await pool.query('SELECT balance FROM wallets WHERE user_id=$1', [req.user.mobile]);
+  return res.json({ success: true, win: 0, newBalance: Number(r.rows[0]?.balance || 0), balance: Number(r.rows[0]?.balance || 0), message: 'TeenPatti Free Play - No real money win' });
 });
-
 // --- PART 2 KHATAM - Ab PART 3 yaha se shuru hoga ---
 // ================= PART 3 / 6 - SOCKET.IO + 15 GAMES - SERVER IS SOURCE OF TRUTH =================
 // RULE: Frontend kabhi khud WIN decide nahi karega. Sab result server se aayega.
