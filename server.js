@@ -643,7 +643,53 @@ async function playGenericGame(socket, gameName, betAmount, winChance, maxMult){
   const balRow = await pool.query('SELECT balance FROM wallets WHERE user_id=$1', [socket.user.mobile]);
   return { success: true, isWin: false, winnings: 0, newBalance: parseFloat(balRow.rows[0]?.balance || 0) };
 }
+// ================= TEENPATTI REAL - PART 1 - ENGINE =================
+// BOOT: 5,10,15,20,25,50,100 | Blind = Boot, Chaal = Boot x 2
+// Patte + Winner sab server decide karega
+const TEEN_BOOTS = [5, 10, 15, 20, 25, 50, 100];
+const teenTables = new Map(); // mobile -> table
 
+function teenDeck(){
+  const suits = ['♠','♥','♦','♣'];
+  const ranks = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+  let d = [];
+  for(let s of suits) for(let r of ranks) d.push({rank:r, suit:s, val: r==='A'?14 : r==='K'?13 : r==='Q'?12 : r==='J'?11 : parseInt(r)});
+  for(let i=d.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [d[i],d[j]]=[d[j],d[i]]; }
+  return d;
+}
+function teenRankHand(cards){
+  const vals = cards.map(c=>c.val).sort((a,b)=>b-a);
+  const isFlush = cards[0].suit===cards[1].suit && cards[1].suit===cards[2].suit;
+  const isSeq = (vals[0]-vals[1]===1 && vals[1]-vals[2]===1) || (vals[0]===14 && vals[1]===3 && vals[2]===2);
+  const isTrail = vals[0]===vals[1] && vals[1]===vals[2];
+  const isPair = vals[0]===vals[1] || vals[1]===vals[2];
+  let score=0, name='High Card';
+  if(isTrail){ score=600+vals[0]; name='Trail'; }
+  else if(isFlush && isSeq){ score=500+vals[0]; name='Pure Sequence'; }
+  else if(isSeq){ score=400+vals[0]; name='Sequence'; }
+  else if(isFlush){ score=300+vals[0]; name='Flush'; }
+  else if(isPair){ const p=vals[0]===vals[1]?vals[0]:vals[1]; score=200+p; name='Pair'; }
+  else { score=100+vals[0]; name='High Card'; }
+  return { score, name };
+}
+function teenGetBet(boot, type){
+  if(type==='BLIND') return boot;
+  if(type==='CHAAL') return boot*2;
+  return boot;
+}
+function teenPublicTable(table, mobile){
+  // Player ko sirf apne patte dikhenge, Bot ke patte SHOW tak chhipe rahenge
+  return {
+    boot: table.boot, pot: table.pot, round: table.round, turn: table.turn,
+    players: table.players.map(p=>({
+      name: p.name, isBot: p.isBot, isYou: p.mobile===mobile,
+      packed: p.packed, seen: p.seen, betTotal: p.betTotal,
+      cards: (p.mobile===mobile || table.showdown) ? p.cards : null,
+      handName: (p.mobile===mobile || table.showdown) ? p.handName : null
+    })),
+    showdown: table.showdown, winner: table.winner
+  };
+}
 io.on('connection', (socket) => {
   const mobile = socket.user.mobile;
   console.log('Socket connected:', mobile);
