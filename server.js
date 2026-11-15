@@ -643,12 +643,11 @@ async function playGenericGame(socket, gameName, betAmount, winChance, maxMult){
   const balRow = await pool.query('SELECT balance FROM wallets WHERE user_id=$1', [socket.user.mobile]);
   return { success: true, isWin: false, winnings: 0, newBalance: parseFloat(balRow.rows[0]?.balance || 0) };
 }
-// ================= TEENPATTI REAL - PART 1 - ENGINE =================
+// ================= TEENPATTI REAL - FIXED - FRONTEND PART-5 SE MATCH =================
 // BOOT: 5,10,15,20,25,50,100 | Blind = Boot, Chaal = Boot x 2
-// Patte + Winner sab server decide karega
+// Patte + Winner sab server decide karega - Frontend sirf dikhayega
 const TEEN_BOOTS = [5, 10, 15, 20, 25, 50, 100];
 const teenTables = new Map(); // mobile -> table
-
 function teenDeck(){
   const suits = ['♠','♥','♦','♣'];
   const ranks = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
@@ -666,6 +665,219 @@ function teenRankHand(cards){
   let score=0, name='High Card';
   if(isTrail){ score=600+vals[0]; name='Trail'; }
   else if(isFlush && isSeq){ score=500+vals[0]; name='Pure Sequence'; }
+  else if(isSeq){ score=400+vals[0]; name='Sequence'; }
+  else if(isFlush){ score=300+vals[0]; name='Flush'; }
+  else if(isPair){ const p=vals[0]===vals[1]?vals[0]:vals[1]; score=200+p; name='Pair'; }
+  else { score=100+vals[0]; name='High Card'; }
+  return { score, name };
+}
+function teenGetBet(boot, type){
+  if(type==='BLIND') return boot;
+  if(type==='CHAAL') return boot*2;
+  return boot;
+}
+function teenPublicTable(table, mobile){
+  const me = table.players[0];
+  return {
+    boot: table.boot, pot: table.pot, round: table.round, turn: table.turn,
+    turnIndex: table.turn, currentStake: table.currentStake, currentBet: table.currentStake,
+    roundActive: !table.showdown, started: !table.showdown, inProgress: !table.showdown,
+    revealAll: table.showdown, showdown: table.showdown, winner: table.winner,
+    you: { cards: me.cards, seen: me.seen, packed: me.packed, chips: me.chips, betTotal: me.betTotal, handName: me.handName, lastAction: me.lastAction },
+    players: table.players.map((p,i)=>({
+      seat: i, name: p.name, isBot: p.isBot, isYou: p.mobile===mobile, isHuman: !p.isBot,
+      packed: p.packed, seen: p.seen, betTotal: p.betTotal, chips: p.chips || 0,
+      lastAction: p.lastAction || '', action: p.lastAction || '',
+      cards: (p.mobile===mobile || table.showdown) ? p.cards : null,
+      handName: (p.mobile===mobile || table.showdown) ? p.handName : null
+    })),
+    status: table.showdown ? 'Showdown!' : 'Server Table | Pot: ₹'+table.pot+' | Boot: ₹'+table.boot
+  };
+}
+io.on('connection', (socket) => {
+  const mobile = socket.user.mobile;
+  console.log('Socket connected:', mobile);
+  socket.join('game-room');
+  socket.on('aviator:join', () => {
+    socket.emit('game:started', { game: 'aviator', roundId: aviatorState.roundId, status: aviatorState.status });
+  });
+  const handleAviatorBet = async (data) => {
+    if(aviatorState.status !== 'WAITING') return socket.emit('aviator:error', { message: 'Bet window band hai - agle round ka wait karo' });
+    if(aviatorBets.has(mobile)) return socket.emit('aviator:error', { message: 'Bet already lagi hai' });
+    const bet = cleanBet(data?.betAmount || data?.bet, MIN_BET, MAX_BET);
+    if(!bet) return socket.emit('aviator:error', { message: `Bet ₹${MIN_BET} se ₹${MAX_BET} ke beech` });
+    const betRes = await placeBet(mobile, bet);
+    if(!betRes.success) return socket.emit('aviator:error', { message: betRes.error });
+    aviatorBets.set(mobile, { bet, cashed: false });
+    socket.emit('aviator:bet-placed', { bet, newBalance: betRes.newBalance });
+  };
+  socket.on('aviator:bet', handleAviatorBet);
+  socket.on('aviator:place-bet', handleAviatorBet);
+  socket.on('aviator:placeBet', handleAviatorBet);
+  socket.on('aviator:cashout', async (data) => {
+    if(aviatorState.status !== 'RUNNING') return socket.emit('aviator:error', { message: 'Plane uda nahi / crash ho gaya' });
+    const myBet = aviatorBets.get(mobile);
+    if(!myBet || myBet.cashed) return socket.emit('aviator:error', { message: 'Bet nahi lagi ya cashout ho gaya' });
+    const mult = Math.min(Number(data?.multiplier || aviatorState.multiplier || 1), aviatorState.multiplier);
+    if(!Number.isFinite(mult) || mult < 1) return;
+    myBet.cashed = true;
+    aviatorBets.set(mobile, myBet);
+    const win = Math.floor(myBet.bet * mult * 100) / 100;
+    const bal = await creditWin(mobile, win);
+    socket.emit('aviator:cashed', { win, multiplier: mult, newBalance: bal });
+  });
+  const genericHandler = (gameKey, maxMult) => async (data) => {
+    const bet = cleanBet(data?.betAmount || data?.bet, MIN_BET, MAX_BET);
+    if(!bet) return socket.emit('game:result', { isWin: false, message: `Bet ₹${MIN_BET} se ₹${MAX_BET}` });
+    const res = await playGenericGame(socket, gameKey, bet, 48, maxMult);
+    if(!res.success) return socket.emit('game:result', { isWin: false, message: res.message });
+    socket.emit('game:result', { isWin: res.isWin, winnings: res.winnings, newBalance: res.newBalance });
+    socket.emit('wallet:update', { balance: res.newBalance });
+  };
+  socket.on('dragontiger:bet', async (data) => {
+    const choice = cleanChoice(data?.choice, ['DRAGON','TIGER','TIE']);
+    if(!choice) return socket.emit('game:result', { isWin: false, message: 'Dragon / Tiger chuno' });
+    const bet = cleanBet(data?.betAmount, MIN_BET, MAX_BET);
+    const res = await playGenericGame(socket, 'dragontiger', bet, 48, 2);
+    if(!res.success) return socket.emit('game:result', { isWin: false, message: res.message });
+    socket.emit('game:result', { isWin: res.isWin, winnings: res.winnings, newBalance: res.newBalance, choice });
+  });
+  socket.on('slots:spin', genericHandler('slots', 10));
+  socket.on('gemstemple:spin', genericHandler('gems', 8));
+  socket.on('gems:spin', genericHandler('gems', 8));
+  socket.on('roulette:bet', genericHandler('roulette', 5));
+  socket.on('andarbahar:bet', genericHandler('andarbahar', 2));
+  socket.on('baccarat:bet', genericHandler('baccarat', 2));
+  socket.on('poker:bet', genericHandler('poker', 5));
+  socket.on('colour:bet', genericHandler('colour', 2));
+  socket.on('colour:play', genericHandler('colour', 2));
+  socket.on('chicken:play', genericHandler('chicken', 3));
+  socket.on('fortune:spin', genericHandler('fortune', 5));
+  socket.on('plinko:drop', genericHandler('plinko', 10));
+  socket.on('spin:spin', genericHandler('spin', 10));
+  socket.on('mines:play', async (data) => {
+    const bet = cleanBet(data?.betAmount, MIN_BET, MAX_BET);
+    const minesCount = Math.min(8, Math.max(1, parseInt(data?.mines || 3)));
+    if(!bet) return socket.emit('game:result', { isWin: false, message: 'Bet sahi daalo' });
+    const res = await playGenericGame(socket, 'mines', bet, 48, 3);
+    if(!res.success) return socket.emit('game:result', { isWin: false, message: res.message });
+    socket.emit('game:result', { isWin: res.isWin, winnings: res.winnings, newBalance: res.newBalance, mines: minesCount });
+  });
+  // ================= TEENPATTI - JOIN / BET / SHOW - FRONTEND PART-5 SE MATCH =================
+  socket.on('teenpatti:join', async (data) => {
+    try{
+      const boot = parseInt(data?.boot);
+      if(!TEEN_BOOTS.includes(boot)) return socket.emit('teenpatti:error', { message: 'Galat Boot! 5,10,15,20,25,50,100 me se chuno' });
+      if(teenTables.has(mobile)){
+        const old = teenTables.get(mobile);
+        if(!old.showdown) return socket.emit('teenpatti:state', teenPublicTable(old, mobile));
+        teenTables.delete(mobile);
+      }
+      const betRes = await placeBet(mobile, boot);
+      if(!betRes.success) return socket.emit('teenpatti:error', { message: betRes.message || betRes.error || 'Balance kam hai' });
+      const deck = teenDeck();
+      const botNames = ['Vikram','Rohan','Ananya','Kabir'];
+      const botChips = [15000,20000,18500,22000];
+      const players = [];
+      const myCards = deck.splice(0,3);
+      const myRank = teenRankHand(myCards);
+      players.push({ name:'You', mobile: mobile, isBot:false, cards: myCards, handScore: myRank.score, handName: myRank.name, packed:false, seen:false, betTotal: boot, chips: betRes.newBalance, lastAction:'Boot ₹'+boot });
+      for(let i=0;i<4;i++){
+        const c = deck.splice(0,3);
+        const r = teenRankHand(c);
+        players.push({ name: botNames[i], mobile:'bot_'+i+'_'+mobile, isBot:true, cards:c, handScore:r.score, handName:r.name, packed:false, seen:false, betTotal: boot, chips: botChips[i], lastAction:'Boot ₹'+boot });
+      }
+      const table = { boot, pot: boot*5, round:1, turn:0, currentStake: boot, players, showdown:false, winner:null };
+      teenTables.set(mobile, table);
+      socket.emit('teenpatti:state', teenPublicTable(table, mobile));
+    }catch(e){ console.log('teen join err', e); socket.emit('teenpatti:error',{message:'Join fail ho gaya'}); }
+  });
+  async function teenDoAction(type, data){
+    try{
+      const table = teenTables.get(mobile);
+      if(!table || table.showdown) return;
+      if(table.turn!==0) return socket.emit('teenpatti:error',{message:'Teri baari nahi hai'});
+      const me = table.players[0];
+      if(me.packed) return socket.emit('teenpatti:error',{message:'Tu Pack ho chuka hai'});
+      if(type==='PACK'){ me.packed = true; me.lastAction = 'Packed'; }
+      else if(type==='SEEN'){ me.seen = true; me.lastAction = 'Seen Cards'; socket.emit('teenpatti:state', teenPublicTable(table, mobile)); return; }
+      else if(type==='BLIND' || type==='CHAAL'){
+        const isChaal = (type==='CHAAL');
+        let amt = isChaal ? table.currentStake*2 : table.currentStake;
+        if(data && data.multiplier===2) amt = table.currentStake*2;
+        if(me.seen && !isChaal) amt = table.currentStake*2;
+        const betRes = await placeBet(mobile, amt);
+        if(!betRes.success) return socket.emit('teenpatti:error',{message: betRes.message || betRes.error || 'Balance kam hai'});
+        me.betTotal += amt; table.pot += amt; me.chips = betRes.newBalance;
+        if(!me.seen) me.lastAction = 'Blind ₹'+amt;
+        else me.lastAction = 'Chaal ₹'+amt;
+        if(isChaal && data && data.multiplier===2) table.currentStake = table.currentStake*2;
+        else if(me.seen) table.currentStake = Math.max(table.currentStake, amt/2);
+      } else return;
+      await teenRunBots(mobile, table);
+      await teenCheckEnd(mobile, table);
+      socket.emit('teenpatti:state', teenPublicTable(table, mobile));
+    }catch(e){ console.log('teen bet err', e); }
+  }
+  socket.on('teenpatti:bet', async (data) => { await teenDoAction(data?.type || 'CHAAL', data); });
+  socket.on('teenpatti:blind', async (data) => { await teenDoAction('BLIND', data); });
+  socket.on('teenpatti:chaal', async (data) => { await teenDoAction('CHAAL', data); });
+  socket.on('teenpatti:pack', async (data) => { await teenDoAction('PACK', data); });
+  socket.on('teenpatti:see', async () => { await teenDoAction('SEEN', {}); });
+  socket.on('teenpatti:seen', async () => { await teenDoAction('SEEN', {}); });
+  socket.on('teenpatti:show', async () => {
+    try{
+      const table = teenTables.get(mobile);
+      if(!table || table.showdown) return;
+      const me = table.players[0];
+      if(me.packed) return socket.emit('teenpatti:error',{message:'Tu Pack ho chuka hai'});
+      const alive = table.players.filter(p=>!p.packed);
+      if(alive.length!==2) return socket.emit('teenpatti:error',{message:'Show ke liye 2 player hone chahiye'});
+      const amt = table.currentStake*2;
+      const betRes = await placeBet(mobile, amt);
+      if(!betRes.success) return socket.emit('teenpatti:error',{message: betRes.message || betRes.error || 'Balance kam hai'});
+      me.betTotal += amt; table.pot += amt; me.chips = betRes.newBalance; me.lastAction = 'Show ₹'+amt;
+      table.showdown = true;
+      await teenFinish(mobile, table);
+      socket.emit('teenpatti:state', teenPublicTable(table, mobile));
+    }catch(e){ console.log('teen show err', e); }
+  });
+  socket.on('teenpatti:sideshow', async () => { socket.emit('teenpatti:sideshow', { result: 'Side Show - Server se handle hoga, agle round me full Side Show aayega' }); });
+  socket.on('teenpatti:side-show', async () => { socket.emit('teenpatti:sideshow', { result: 'Side Show - Server se handle hoga, agle round me full Side Show aayega' }); });
+  socket.on('teenpatti:leave', () => { teenTables.delete(mobile); });
+  async function teenRunBots(mobile, table){
+    for(let idx=1; idx<=4; idx++){
+      const bot = table.players[idx];
+      if(bot.packed || table.showdown) continue;
+      const r = Math.random();
+      if(!bot.seen && r < 0.35) bot.seen = true;
+      if(bot.handScore < 210 && r < 0.35){ bot.packed = true; bot.lastAction = 'Packed'; }
+      else { const amt = bot.seen ? table.currentStake*2 : table.currentStake; bot.betTotal += amt; table.pot += amt; bot.lastAction = (bot.seen ? 'Chaal ₹' : 'Blind ₹')+amt; }
+    }
+    table.round++;
+    table.turn = 0;
+    if(table.round >= 6){ table.showdown = true; await teenFinish(mobile, table); }
+  }
+  async function teenCheckEnd(mobile, table){
+    const alive = table.players.filter(p=>!p.packed);
+    if(alive.length===1){ table.showdown = true; await teenFinish(mobile, table); }
+  }
+  async function teenFinish(mobile, table){
+    const alive = table.players.filter(p=>!p.packed);
+    alive.sort((a,b)=>b.handScore - a.handScore);
+    const win = alive[0];
+    table.winner = { name: win.name, handName: win.handName, isYou: win.mobile===mobile, pot: table.pot };
+    if(win.mobile===mobile){ const nb = await creditWin(mobile, table.pot); table.players[0].chips = nb; }
+    setTimeout(()=>{ teenTables.delete(mobile); }, 5000);
+  }
+  socket.on('teenpatti:get-state', () => {
+    const table = teenTables.get(mobile);
+    if(table) socket.emit('teenpatti:state', teenPublicTable(table, mobile));
+  });
+  socket.on('disconnect', () => {
+    console.log('Socket disconnected:', mobile);
+  });
+});
   else if(isSeq){ score=400+vals[0]; name='Sequence'; }
   else if(isFlush){ score=300+vals[0]; name='Flush'; }
   else if(isPair){ const p=vals[0]===vals[1]?vals[0]:vals[1]; score=200+p; name='Pair'; }
