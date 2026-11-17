@@ -931,7 +931,7 @@ io.on('connection', (socket) => {
     if(aviatorState.status !== 'RUNNING') return socket.emit('aviator:error', { message: 'Plane uda nahi / crash ho gaya' });
     const myBet = aviatorBets.get(mobile);
     if(!myBet || myBet.cashed) return socket.emit('aviator:error', { message: 'Bet nahi lagi ya cashout ho gaya' });
-    const mult = Math.min(Number(data?.multiplier || aviatorState.multiplier || 1), aviatorState.multiplier);
+const mult = aviatorState.multiplier;
     if(!Number.isFinite(mult) || mult < 1) return;
     myBet.cashed = true;
     aviatorBets.set(mobile, myBet);
