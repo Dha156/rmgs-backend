@@ -566,6 +566,20 @@ async function teenDoAction(type, data, socket, mobile){
 
 // ===== AVIATOR STATE - FIXED: Crash secureRandom se =====
 let aviatorState = { phase: 'waiting', multiplier: 1.0, crashAt: 2.0, roundId: 0, startedAt: 0, bets: new Map() };
+function emitAviatorAll(){
+  const payload = {
+    phase: aviatorState.phase, status: aviatorState.phase,
+    multiplier: aviatorState.multiplier, currentMultiplier: aviatorState.multiplier,
+    crashAt: aviatorState.crashAt, crashPoint: aviatorState.crashAt,
+    roundId: aviatorState.roundId, round: aviatorState.roundId
+  };
+  io.emit('aviator:state', payload);
+  io.emit('aviator:update', payload);
+  io.emit('aviator:tick', payload);
+  io.emit('aviator:multiplier', payload);
+  io.emit('aviator:round', payload);
+  io.emit('aviator:game-state', payload);
+}
 function startAviator(){
   aviatorState.roundId++;
   aviatorState.phase = 'waiting';
@@ -578,11 +592,15 @@ function startAviator(){
   crash = Math.min(crash, 50);
   aviatorState.crashAt = Math.floor(crash * 100) / 100;
   io.emit('game:started', { game: 'aviator', roundId: aviatorState.roundId });
-  io.emit('aviator:state', { phase: 'waiting', multiplier: 1.0, roundId: aviatorState.roundId });
+  io.emit('aviator:round-start', { roundId: aviatorState.roundId, phase: 'waiting', status: 'waiting', multiplier: 1.0 });
+  io.emit('aviator:betting', { roundId: aviatorState.roundId, phase: 'waiting' });
+  emitAviatorAll();
   setTimeout(() => {
     aviatorState.phase = 'flying';
     aviatorState.startedAt = Date.now();
-    io.emit('aviator:state', { phase: 'flying', multiplier: 1.0, roundId: aviatorState.roundId });
+    io.emit('aviator:round-start', { roundId: aviatorState.roundId, phase: 'flying', status: 'flying', multiplier: 1.0 });
+    io.emit('aviator:start', { roundId: aviatorState.roundId, multiplier: 1.0 });
+    emitAviatorAll();
   }, 5000);
 }
 setInterval(() => {
@@ -592,13 +610,17 @@ setInterval(() => {
   aviatorState.multiplier = mult;
   if(mult >= aviatorState.crashAt){
     aviatorState.phase = 'crashed';
+    const p = { multiplier: aviatorState.crashAt, crashAt: aviatorState.crashAt, crashPoint: aviatorState.crashAt, roundId: aviatorState.roundId, phase: 'crashed', status: 'crashed' };
     io.emit('game:crashed', { game: 'aviator', roundId: aviatorState.roundId, multiplier: aviatorState.crashAt });
-    io.emit('aviator:crash', { multiplier: aviatorState.crashAt, roundId: aviatorState.roundId });
+    io.emit('aviator:crash', p);
+    io.emit('aviator:crashed', p);
+    io.emit('aviator:round-end', p);
+    io.emit('aviator:roundEnd', p);
     setTimeout(startAviator, 4000);
   } else {
-    io.emit('aviator:tick', { multiplier: mult, roundId: aviatorState.roundId });
+    emitAviatorAll();
   }
-}, 200);
+}, 100);
 
 async function handleAviatorBet(data, socket, mobile){
   try{
