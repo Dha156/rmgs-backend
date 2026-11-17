@@ -24,20 +24,19 @@ if(!process.env.DATABASE_URL){
 const app = express();
 app.set('trust proxy', 1);
 
-// --- CORS FIXED V3 - Frontend ke hisaab se ---
-// Frontend: Vercel + Tiiny dono se aayega, isliye dono allow hai
+// --- CORS FIXED V4 - Sirf exact domain ---
+function secureRandom(){ return crypto.randomBytes(4).readUInt32LE(0)/4294967296; }
+function secureRandomInt(min,max){ return crypto.randomInt(min, max+1); }
 function cleanOrigin(s){
   return String(s||'').trim().replace(/\/+$/,'').toLowerCase();
 }
 const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || 'https://royal-casino-club.vercel.app,https://royalcasino.tiiny.site').split(',').map(cleanOrigin).filter(Boolean);
 
 function isOriginAllowed(origin){
-  if(!origin) return true; // Postman / Health check
+  if(!origin) return true;
   const o = cleanOrigin(origin);
   if(ALLOWED_ORIGINS.includes(o)) return true;
-  if(o.endsWith('.vercel.app')) return true; // Preview link bhi chalega
-  if(o.endsWith('.tiiny.site')) return true; // FIX: Tiiny pe check karte time block na ho
-  if(o.endsWith('.onrender.com')) return true;
+  // FIXED: koi bhi .vercel.app / .tiiny.site / .onrender.com allow NAHI
   if(o.includes('localhost') && process.env.NODE_ENV !== 'production') return true;
   return false;
 }
@@ -84,7 +83,8 @@ const io = new Server(server, {
   }
 });
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const revokedTokens = new Set(); // FIXED: logout par token blacklist
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV==='production' ? { rejectUnauthorized: true } : { rejectUnauthorized: false } });
 
 // --- Helpers - Secure ---
 function cleanBet(v, min, max){
@@ -130,12 +130,14 @@ function makeToken(mobile) { return jwt.sign({ mobile }, process.env.JWT_SECRET,
 function checkAuth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ success: false, message: 'Login karo pehle' });
+  if(revokedTokens.has(token)) return res.status(401).json({ success: false, message: 'Logout ho chuka hai, dobara login karo' });
   try { req.user = jwt.verify(token, process.env.JWT_SECRET); next(); } catch(e){ return res.status(401).json({ success: false, message: 'Token galat / expire ho gaya' }); }
 }
 
 function checkAdmin(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ success: false, message: 'Admin login chahiye' });
+  if(revokedTokens.has(token)) return res.status(401).json({ success: false, message: 'Logout ho chuka hai' });
   try {
     const d = jwt.verify(token, process.env.JWT_SECRET);
     if (d.role !== 'admin') return res.status(403).json({ success: false, message: 'Admin nahi ho' });
@@ -148,7 +150,6 @@ async function audit(actor, action, details, ip) {
 }
 
 // --- SECURE FIX: UPI ab code me hard-coded nahi, Render Env se aayega ---
-// Render Env me daalo: MY_UPI_ID , MY_UPI_NAME
 const MY_UPI_ID = process.env.MY_UPI_ID || "";
 const MY_UPI_NAME = process.env.MY_UPI_NAME || "Royal Casino";
 const MY_MIN_DEPOSIT = 150;
@@ -177,7 +178,6 @@ async function initDb(){
   }catch(e){ console.log('DB init warning:', e.message); }
 }
 initDb();
-
 app.get('/fix-db', checkAdmin, async (req, res) => {
   try {
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS lvl INTEGER DEFAULT 0;`);
@@ -188,7 +188,7 @@ app.get('/fix-db', checkAdmin, async (req, res) => {
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS dob DATE;`);
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT false;`);
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS self_excluded_until TIMESTAMP;`);
-        await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit NUMERIC(12,2) DEFAULT 0;`);
+    await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit NUMERIC(12,2) DEFAULT 0;`);
     await pool.query(`ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_deposit_date DATE DEFAULT CURRENT_DATE;`);
     res.json({ success: true, message: 'HO GAYA!' });
   } catch(e){ res.status(500).json({ success: false, message: 'DB fix fail' }); }
@@ -263,7 +263,6 @@ function is18Plus(dobStr) {
   return age >= 18;
 }
 
-// --- PART 1 KHATAM - Ab PART 2 yaha se shuru hoga ---
 // ================= PART 2 / 6 - DEPOSIT + WITHDRAW + OTP + ADMIN =================
 // ===== DEPOSIT CREATE QR - FRONTEND COMPAT + STRICT =====
 async function handleDepositCreateQR(req, res){
@@ -284,7 +283,6 @@ app.post('/api/deposit/create-qr', checkAuth, handleDepositCreateQR);
 app.post('/api/wallet/deposit-create-qr', checkAuth, handleDepositCreateQR);
 
 // ===== DEPOSIT REQUEST - UTR 12 DIGIT STRICT =====
-// FRONTEND FIX NOTE: Frontend me bhi UTR 12 digit check karna hai, warna ye 400 dega
 async function handleDepositRequest(req, res){
   const amount = cleanBet(req.body.amount, MY_MIN_DEPOSIT, 50000);
   if(!amount) return res.status(400).json({ success: false, message: `Min ₹${MY_MIN_DEPOSIT} - Max ₹50000` });
@@ -306,9 +304,7 @@ async function handleDepositRequest(req, res){
 app.post('/api/wallet/deposit-request', checkAuth, handleDepositRequest);
 app.post('/api/deposit/request', checkAuth, handleDepositRequest);
 app.post('/api/deposit-request', checkAuth, handleDepositRequest);
-
 // ===== WITHDRAW - UPI / IFSC STRICT =====
-// Frontend bhejta hai: {amount, upi_id, account_no, ifsc}
 async function handleWithdraw(req, res){
   const amount = cleanBet(req.body.amount, MY_MIN_WITHDRAW, 50000);
   if(!amount) return res.status(400).json({ success: false, message: `Min ₹${MY_MIN_WITHDRAW} - Max ₹50000` });
@@ -371,17 +367,16 @@ async function initDatabase() {
 }
 initDatabase();
 
-// ================= OTP - FRONTEND KE HISAB SE FIXED =================
+// ================= OTP =================
 const otpStore = new Map();
 app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
   const mobile = String(req.body.mobile||'').replace(/[^0-9]/g,'').slice(0,10);
   const dob = String(req.body.dob||'').slice(0,10);
-  // Frontend: {name, mobile, dob} bhejta hai - name bhi save karo taaki verify me wapas de sake
   const reqName = String(req.body.name||'').slice(0,30);
-    if (!mobile || !/^[6-9]\d{9}$/.test(mobile)) return res.status(400).json({ success: false, message: 'Sahi 10 digit mobile daalo' });
+  if (!mobile || !/^[6-9]\d{9}$/.test(mobile)) return res.status(400).json({ success: false, message: 'Sahi 10 digit mobile daalo' });
   let w;
   try{ w = await pool.query('SELECT dob FROM wallets WHERE user_id=$1', [mobile]); }
-  catch(e){ console.error('DB fail send-otp', e.message); return res.status(500).json({ success: false, message: 'Database down hai - thodi der baad try karo' }); }
+  catch(e){ return res.status(500).json({ success: false, message: 'Database down hai - thodi der baad try karo' }); }
   if (!w.rows.length) {
     if (!dob) return res.status(400).json({ success: false, message: '18+ hone ke liye Date of Birth chahiye' });
     if (!is18Plus(dob)) return res.status(403).json({ success: false, message: '18 saal se kam wale nahi khel sakte.' });
@@ -390,12 +385,11 @@ app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
   if (!apiKey) return res.status(500).json({ success: false, message: 'OTP service band hai' });
   try {
     const data = await safeHttpsGet(`https://2factor.in/API/V1/${apiKey}/SMS/${mobile}/AUTOGEN/OTP1`);
-    console.log('2Factor send-otp:', JSON.stringify(data).slice(0,200));
     if (data.Status === 'Success') {
       otpStore.set(mobile, { sessionId: data.Details, expiresAt: Date.now() + 5 * 60 * 1000, dob: dob || w.rows[0]?.dob || null, attempts: 0, name: reqName });
       res.json({ success: true, message: 'OTP bhej diya' });
-    } else { console.error('2Factor fail:', JSON.stringify(data).slice(0,300)); res.status(400).json({ success: false, message: 'OTP nahi bheja gaya - 2Factor key / balance check karo' }); }
-  } catch(e){ console.error('OTP send fail:', e.message); res.status(500).json({ success: false, message: 'OTP fail - Render logs me 2Factor error dekho' }); }
+    } else { res.status(400).json({ success: false, message: 'OTP nahi bheja gaya - 2Factor key / balance check karo' }); }
+  } catch(e){ res.status(500).json({ success: false, message: 'OTP fail - Render logs me 2Factor error dekho' }); }
 });
 
 app.post('/api/auth/verify-otp', loginLimiter, async (req, res) => {
@@ -418,9 +412,8 @@ app.post('/api/auth/verify-otp', loginLimiter, async (req, res) => {
     const blocked = await checkBlocked(mobile);
     if (blocked.blocked) return res.status(403).json({ success: false, message: blocked.reason });
     const token = makeToken(mobile);
-    // FIX: Frontend maangta hai d.user.id / name / bonus - wahi bhejo
     res.json({ success: true, token, user: { id: mobile, mobile, name: rec.name || 'Player', balance: w.rows[0].balance, bonus: Number(w.rows[0].bonus_total||0), vip_level: w.rows[0].vip_level } });
-  } catch(e){ console.error('OTP verify fail', e.message); res.status(500).json({ success: false, message: 'Login fail' }); }
+  } catch(e){ res.status(500).json({ success: false, message: 'Login fail' }); }
 });
 
 app.post('/api/user/self-exclude', checkAuth, async (req, res) => {
@@ -433,7 +426,6 @@ app.post('/api/user/self-exclude', checkAuth, async (req, res) => {
 app.get('/api/wallet/balance', checkAuth, async (req, res) => {
   const r = await pool.query('SELECT balance, vip_level, bonus_total, is_blocked, self_excluded_until FROM wallets WHERE user_id=$1', [req.user.mobile]);
   if (!r.rows.length) return res.status(404).json({ success: false, message: 'Wallet nahi mila' });
-  // FIX: Frontend d.bonus maangta hai
   res.json({ success: true, balance: r.rows[0].balance, bonus: Number(r.rows[0].bonus_total||0), vip_level: r.rows[0].vip_level });
 });
 
@@ -442,6 +434,14 @@ app.get('/api/wallet/history', checkAuth, async (req, res) => {
   res.json({ success: true, history: r.rows });
 });
 
+// ===== LOGOUT - FIXED: Token blacklist =====
+app.post('/api/logout', checkAuth, (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if(token) revokedTokens.add(token);
+  res.json({ success: true, message: 'Logout ho gaya' });
+});
+
+// ===== ADMIN LOGIN - FIXED: 2FA + 2h token =====
 app.post('/api/admin/login', loginLimiter, async (req, res) => {
   const username = String(req.body.username||'').slice(0,100);
   const password = String(req.body.password||'').slice(0,200);
@@ -450,7 +450,12 @@ app.post('/api/admin/login', loginLimiter, async (req, res) => {
   if (!r.rows.length) return res.status(401).json({ success: false, message: 'Galat login' });
   const ok = await bcrypt.compare(password, r.rows[0].password_hash);
   if(!ok) return res.status(401).json({ success: false, message: 'Galat login' });
-  const token = jwt.sign({ username, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '12h' });
+  // FIXED: Admin Code - Render me ADMIN_2FA_CODE set karo, nahi set kiya to ye check skip hoga
+  const adminCode = String(req.body.adminCode || req.body.otp || '');
+  if(process.env.ADMIN_2FA_CODE && adminCode !== process.env.ADMIN_2FA_CODE){
+    return res.status(401).json({ success: false, message: 'Admin Code galat hai' });
+  }
+  const token = jwt.sign({ username, role: 'admin' }, process.env.JWT_SECRET, { expiresIn: '2h' });
   res.json({ success: true, token });
 });
 
@@ -509,7 +514,6 @@ app.get('/api/admin/settings', checkAdmin, async (req, res) => {
   const r = await pool.query('SELECT * FROM settings');
   res.json({ success: true, settings: r.rows });
 });
-
 app.post('/api/admin/teenpatti-settings', checkAdmin, async (req, res) => {
   await pool.query(`INSERT INTO settings (key,value) VALUES ('teenpatti_rake',$1) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, [String(req.body.rake ?? 5)]);
   res.json({ success: true, message: 'TeenPatti settings save' });
@@ -533,7 +537,7 @@ app.post('/api/admin/block-user', checkAdmin, async (req, res) => {
   res.json({ success: true, message: block ? 'User block ho gaya' : 'User unblock ho gaya' });
 });
 
-// ===== BONUS - Frontend: /api/bonus/welcome + /api/referral/share =====
+// ===== BONUS =====
 app.post('/api/bonus/welcome', checkAuth, async (req, res) => {
   const c = await pool.connect();
   try{
@@ -548,10 +552,17 @@ app.post('/api/bonus/welcome', checkAuth, async (req, res) => {
   }catch(e){ try{ await c.query('ROLLBACK'); }catch(_){} res.status(400).json({ success: false, message: e.message }); } finally { c.release(); }
 });
 
+// ===== SHARE BONUS - FIXED: Code verify hoga, khud ka nahi chalega =====
 app.post('/api/referral/share', checkAuth, async (req, res) => {
   const code = String(req.body.code||'').slice(0,50);
   if(!code) return res.status(400).json({ success: false, message: 'Code chahiye' });
   try{
+    const owner = await pool.query('SELECT user_id FROM wallets WHERE user_id=$1', [code]);
+    // NOTE: Agar teri users table me alag referral_code column hai to waha check kar.
+    // Yaha code = dusre user ka mobile / referral code mana hai. Khud ka code reject hai.
+    if(owner.rows.length && owner.rows[0].user_id === req.user.mobile) return res.status(400).json({ success: false, message: 'Khud ka code nahi chalega' });
+    // Agar code kisi ka bhi nahi hai to bhi reject - free loot band
+    if(!owner.rows.length) return res.status(400).json({ success: false, message: 'Galat referral code' });
     const r = await pool.query('INSERT INTO referral_claims (user_id, code, amount) VALUES ($1,$2,20) RETURNING *', [req.user.mobile, code]);
     await pool.query('UPDATE wallets SET balance=balance+20, bonus_total=COALESCE(bonus_total,0)+20 WHERE user_id=$1', [req.user.mobile]);
     await pool.query('INSERT INTO transactions (user_id, amount, type, status) VALUES ($1,20,\'BONUS\',\'SUCCESS\')', [req.user.mobile]);
@@ -562,35 +573,30 @@ app.post('/api/referral/share', checkAuth, async (req, res) => {
   }
 });
 
-// ===== FIXED: TeenPatti settle - Frontend se pot / isHumanWin ab nahi mana jayega =====
-// Pehle koi bhi pot=50000 + isHumanWin=true bhej ke free me paisa le leta tha. Ab ye route kuch credit nahi karta, sirf balance wapas deta hai. TeenPatti ab Free Play hai.
 app.post('/api/teenpatti/settle', checkAuth, async (req, res) => {
   const r = await pool.query('SELECT balance FROM wallets WHERE user_id=$1', [req.user.mobile]);
   return res.json({ success: true, win: 0, newBalance: Number(r.rows[0]?.balance || 0), balance: Number(r.rows[0]?.balance || 0), message: 'TeenPatti Free Play - No real money win' });
 });
-// --- PART 2 KHATAM - Ab PART 3 yaha se shuru hoga ---
-// ================= PART 3 / 6 - SOCKET.IO + 15 GAMES - SERVER IS SOURCE OF TRUTH =================
-// RULE: Frontend kabhi khud WIN decide nahi karega. Sab result server se aayega.
-// Frontend me jo fake history / fake players tha, wo Part me Frontend fix me hatayenge.
+// ================= PART 4 / 6 - SOCKET.IO + 15 GAMES =================
+// RULE: Frontend kabhi WIN decide nahi karega. Sab result server se aayega.
 
-// ===== SOCKET AUTH - Frontend ka token yaha verify hota hai =====
+// ===== SOCKET AUTH - FIXED: revoked token bhi check hoga =====
 io.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token || socket.handshake.headers?.authorization?.split(' ')[1];
     if(!token) return next(new Error('Token chahiye'));
+    if(revokedTokens.has(token)) return next(new Error('Logout ho chuka hai'));
     socket.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
   } catch(e){ next(new Error('Token galat hai')); }
 });
 
-// ===== AVIATOR STATE - Ek hi round sabke liye =====
+// ===== AVIATOR STATE =====
 let aviatorState = { roundId: 0, multiplier: 1, status: 'WAITING', startedAt: 0, crashAt: 2, timer: null };
-let aviatorBets = new Map(); // mobile -> {bet, cashed}
+let aviatorBets = new Map();
 
 function randomCrash(){
-  // House edge ke hisaab se crash point
-  const edge = 4; // 4% house edge, settings se bhi le sakte ho
-  const r = Math.random();
+  const r = secureRandom(); // FIXED: Math.random() nahi
   let crash = Math.max(1.10, 0.96 / Math.max(0.01, 1 - r));
   if(crash > 100) crash = 100;
   return Math.floor(crash * 100) / 100;
@@ -604,7 +610,6 @@ function startAviator(){
     aviatorState.multiplier = 1;
     aviatorBets = new Map();
     io.emit('game:started', { game: 'aviator', roundId: aviatorState.roundId });
-    // 8 sec betting window
     await new Promise(r => setTimeout(r, 8000));
     aviatorState.crashAt = randomCrash();
     aviatorState.status = 'RUNNING';
@@ -616,7 +621,6 @@ function startAviator(){
         clearInterval(tick);
         aviatorState.status = 'CRASHED';
         io.emit('game:crashed', { game: 'aviator', roundId: aviatorState.roundId, multiplier: aviatorState.crashAt });
-        // Jo cashout nahi kar paye, unka bet gaya (placeBet me pehle hi kat chuka hai)
         setTimeout(loop, 5000);
       }
     }, 100);
@@ -629,13 +633,12 @@ async function playGenericGame(socket, gameName, betAmount, winChance, maxMult){
   if(!socketRateLimit(socket, 5)) return { success: false, message: 'Bahut tez khel rahe ho' };
   const betRes = await placeBet(socket.user.mobile, betAmount);
   if(!betRes.success) return { success: false, message: betRes.error };
-  // RTP 96% ke hisaab se win decide
   const rtp = await getSetting(gameName + '_rtp', 96);
-  const winRoll = Math.random() * 100;
-  const isWin = winRoll < (rtp / 2); // roughly 48% win rate, payout se RTP balance hota hai
+  const winRoll = secureRandom() * 100; // FIXED
+  const isWin = winRoll < (rtp / 2);
   let winnings = 0;
   if(isWin){
-    const mult = 1 + Math.random() * (maxMult - 1);
+    const mult = 1 + secureRandom() * (maxMult - 1); // FIXED
     winnings = Math.floor(betAmount * mult * 100) / 100;
     const bal = await creditWin(socket.user.mobile, winnings);
     return { success: true, isWin: true, winnings, newBalance: bal };
@@ -643,17 +646,16 @@ async function playGenericGame(socket, gameName, betAmount, winChance, maxMult){
   const balRow = await pool.query('SELECT balance FROM wallets WHERE user_id=$1', [socket.user.mobile]);
   return { success: true, isWin: false, winnings: 0, newBalance: parseFloat(balRow.rows[0]?.balance || 0) };
 }
-// ================= TEENPATTI REAL - FIXED - FRONTEND PART-5 SE MATCH =================
-// BOOT: 5,10,15,20,25,50,100 | Blind = Boot, Chaal = Boot x 2
-// Patte + Winner sab server decide karega - Frontend sirf dikhayega
+
+// ================= TEENPATTI =================
 const TEEN_BOOTS = [5, 10, 15, 20, 25, 50, 100];
-const teenTables = new Map(); // mobile -> table
+const teenTables = new Map();
 function teenDeck(){
   const suits = ['♠','♥','♦','♣'];
   const ranks = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
   let d = [];
   for(let s of suits) for(let r of ranks) d.push({rank:r, suit:s, val: r==='A'?14 : r==='K'?13 : r==='Q'?12 : r==='J'?11 : parseInt(r)});
-  for(let i=d.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [d[i],d[j]]=[d[j],d[i]]; }
+  for(let i=d.length-1;i>0;i--){ const j=secureRandomInt(0,i); [d[i],d[j]]=[d[j],d[i]]; } // FIXED: crypto shuffle
   return d;
 }
 function teenRankHand(cards){
@@ -718,7 +720,7 @@ io.on('connection', (socket) => {
     if(aviatorState.status !== 'RUNNING') return socket.emit('aviator:error', { message: 'Plane uda nahi / crash ho gaya' });
     const myBet = aviatorBets.get(mobile);
     if(!myBet || myBet.cashed) return socket.emit('aviator:error', { message: 'Bet nahi lagi ya cashout ho gaya' });
-    const mult = Math.min(Number(data?.multiplier || aviatorState.multiplier || 1), aviatorState.multiplier);
+    const mult = aviatorState.multiplier; // FIXED: frontend ka multiplier nahi mana jayega
     if(!Number.isFinite(mult) || mult < 1) return;
     myBet.cashed = true;
     aviatorBets.set(mobile, myBet);
@@ -763,7 +765,7 @@ io.on('connection', (socket) => {
     if(!res.success) return socket.emit('game:result', { isWin: false, message: res.message });
     socket.emit('game:result', { isWin: res.isWin, winnings: res.winnings, newBalance: res.newBalance, mines: minesCount });
   });
-  // ================= TEENPATTI - JOIN / BET / SHOW - FRONTEND PART-5 SE MATCH =================
+  // ================= TEENPATTI =================
   socket.on('teenpatti:join', async (data) => {
     try{
       const boot = parseInt(data?.boot);
@@ -849,7 +851,7 @@ io.on('connection', (socket) => {
     for(let idx=1; idx<=4; idx++){
       const bot = table.players[idx];
       if(bot.packed || table.showdown) continue;
-      const r = Math.random();
+      const r = secureRandom(); // FIXED
       if(!bot.seen && r < 0.35) bot.seen = true;
       if(bot.handScore < 210 && r < 0.35){ bot.packed = true; bot.lastAction = 'Packed'; }
       else { const amt = bot.seen ? table.currentStake*2 : table.currentStake; bot.betTotal += amt; table.pot += amt; bot.lastAction = (bot.seen ? 'Chaal ₹' : 'Blind ₹')+amt; }
@@ -878,209 +880,7 @@ io.on('connection', (socket) => {
     console.log('Socket disconnected:', mobile);
   });
 });
-  else if(isSeq){ score=400+vals[0]; name='Sequence'; }
-  else if(isFlush){ score=300+vals[0]; name='Flush'; }
-  else if(isPair){ const p=vals[0]===vals[1]?vals[0]:vals[1]; score=200+p; name='Pair'; }
-  else { score=100+vals[0]; name='High Card'; }
-  return { score, name };
-}
-function teenGetBet(boot, type){
-  if(type==='BLIND') return boot;
-  if(type==='CHAAL') return boot*2;
-  return boot;
-}
-function teenPublicTable(table, mobile){
-  // Player ko sirf apne patte dikhenge, Bot ke patte SHOW tak chhipe rahenge
-  return {
-    boot: table.boot, pot: table.pot, round: table.round, turn: table.turn,
-    players: table.players.map(p=>({
-      name: p.name, isBot: p.isBot, isYou: p.mobile===mobile,
-      packed: p.packed, seen: p.seen, betTotal: p.betTotal,
-      cards: (p.mobile===mobile || table.showdown) ? p.cards : null,
-      handName: (p.mobile===mobile || table.showdown) ? p.handName : null
-    })),
-    showdown: table.showdown, winner: table.winner
-  };
-}
-io.on('connection', (socket) => {
-  const mobile = socket.user.mobile;
-  console.log('Socket connected:', mobile);
-  socket.join('game-room');
-
-  socket.on('aviator:join', () => {
-    socket.emit('game:started', { game: 'aviator', roundId: aviatorState.roundId, status: aviatorState.status });
-  });
-
-  // ===== AVIATOR BET - Frontend: socket.emit('aviator:bet', {betAmount}) ya aviator:place-bet =====
-  const handleAviatorBet = async (data) => {
-    if(aviatorState.status !== 'WAITING') return socket.emit('aviator:error', { message: 'Bet window band hai - agle round ka wait karo' });
-    if(aviatorBets.has(mobile)) return socket.emit('aviator:error', { message: 'Bet already lagi hai' });
-    const bet = cleanBet(data?.betAmount || data?.bet, MIN_BET, MAX_BET);
-    if(!bet) return socket.emit('aviator:error', { message: `Bet ₹${MIN_BET} se ₹${MAX_BET} ke beech` });
-    const betRes = await placeBet(mobile, bet);
-    if(!betRes.success) return socket.emit('aviator:error', { message: betRes.error });
-    aviatorBets.set(mobile, { bet, cashed: false });
-    socket.emit('aviator:bet-placed', { bet, newBalance: betRes.newBalance });
-  };
-  socket.on('aviator:bet', handleAviatorBet);
-  socket.on('aviator:place-bet', handleAviatorBet);
-  socket.on('aviator:placeBet', handleAviatorBet);
-
-  // ===== AVIATOR CASHOUT - Frontend: socket.emit('aviator:cashout',{multiplier}) =====
-  socket.on('aviator:cashout', async (data) => {
-    if(aviatorState.status !== 'RUNNING') return socket.emit('aviator:error', { message: 'Plane uda nahi / crash ho gaya' });
-    const myBet = aviatorBets.get(mobile);
-    if(!myBet || myBet.cashed) return socket.emit('aviator:error', { message: 'Bet nahi lagi ya cashout ho gaya' });
-const mult = aviatorState.multiplier;
-    if(!Number.isFinite(mult) || mult < 1) return;
-    myBet.cashed = true;
-    aviatorBets.set(mobile, myBet);
-    const win = Math.floor(myBet.bet * mult * 100) / 100;
-    const bal = await creditWin(mobile, win);
-    socket.emit('aviator:cashed', { win, multiplier: mult, newBalance: bal });
-  });
-
-  // ===== GENERIC BET HANDLER - Sab games ke liye ek jaisa =====
-  const genericHandler = (gameKey, maxMult) => async (data) => {
-    const bet = cleanBet(data?.betAmount || data?.bet, MIN_BET, MAX_BET);
-    if(!bet) return socket.emit('game:result', { isWin: false, message: `Bet ₹${MIN_BET} se ₹${MAX_BET}` });
-    const res = await playGenericGame(socket, gameKey, bet, 48, maxMult);
-    if(!res.success) return socket.emit('game:result', { isWin: false, message: res.message });
-    socket.emit('game:result', { isWin: res.isWin, winnings: res.winnings, newBalance: res.newBalance });
-    socket.emit('wallet:update', { balance: res.newBalance });
-  };
-
-  // Frontend emits - ye sab naam Frontend me use hote hai
-  socket.on('dragontiger:bet', async (data) => {
-    const choice = cleanChoice(data?.choice, ['DRAGON','TIGER','TIE']);
-    if(!choice) return socket.emit('game:result', { isWin: false, message: 'Dragon / Tiger chuno' });
-    const bet = cleanBet(data?.betAmount, MIN_BET, MAX_BET);
-    const res = await playGenericGame(socket, 'dragontiger', bet, 48, 2);
-    if(!res.success) return socket.emit('game:result', { isWin: false, message: res.message });
-    // DragonTiger me Tie pe 8x, baaki 2x - simple: server result hi final hai
-    socket.emit('game:result', { isWin: res.isWin, winnings: res.winnings, newBalance: res.newBalance, choice });
-  });
-  socket.on('slots:spin', genericHandler('slots', 10));
-  socket.on('gemstemple:spin', genericHandler('gems', 8));
-  socket.on('gems:spin', genericHandler('gems', 8));
-  socket.on('roulette:bet', genericHandler('roulette', 5));
-  socket.on('andarbahar:bet', genericHandler('andarbahar', 2));
-  socket.on('baccarat:bet', genericHandler('baccarat', 2));
-  socket.on('poker:bet', genericHandler('poker', 5));
-  socket.on('colour:bet', genericHandler('colour', 2));
-  socket.on('colour:play', genericHandler('colour', 2));
-  socket.on('chicken:play', genericHandler('chicken', 3));
-  socket.on('fortune:spin', genericHandler('fortune', 5));
-  socket.on('plinko:drop', genericHandler('plinko', 10));
-  socket.on('spin:spin', genericHandler('spin', 10));
-
-  // ===== MINES - Frontend: socket.emit('mines:play',{betAmount, mines}) =====
-  socket.on('mines:play', async (data) => {
-    const bet = cleanBet(data?.betAmount, MIN_BET, MAX_BET);
-    const minesCount = Math.min(8, Math.max(1, parseInt(data?.mines || 3)));
-    if(!bet) return socket.emit('game:result', { isWin: false, message: 'Bet sahi daalo' });
-    const res = await playGenericGame(socket, 'mines', bet, 48, 3);
-    if(!res.success) return socket.emit('game:result', { isWin: false, message: res.message });
-    socket.emit('game:result', { isWin: res.isWin, winnings: res.winnings, newBalance: res.newBalance, mines: minesCount });
-  });
-
- // ================= TEENPATTI REAL - PART 2 - JOIN / BET / SHOW =================
-socket.on('teenpatti:join', async (data) => {
-  try{
-    const boot = parseInt(data?.boot);
-    if(!TEEN_BOOTS.includes(boot)) return socket.emit('teenpatti:error', { message: 'Galat Boot! 5,10,15,20,25,50,100 me se chuno' });
-    if(teenTables.has(mobile)) return socket.emit('teenpatti:error', { message: 'Pehle wala game khatam karo' });
-    const betRes = await placeBet(mobile, boot);
-    if(!betRes.success) return socket.emit('teenpatti:error', { message: betRes.message || 'Balance kam hai' });
-    const deck = teenDeck();
-    const botNames = ['Raju','Vikram'];
-    const players = [];
-    const myCards = deck.splice(0,3);
-    const myRank = teenRankHand(myCards);
-    players.push({ name:'You', mobile: mobile, isBot:false, cards: myCards, handScore: myRank.score, handName: myRank.name, packed:false, seen:false, betTotal: boot });
-    for(let i=0;i<2;i++){
-      const c = deck.splice(0,3);
-      const r = teenRankHand(c);
-      players.push({ name: botNames[i], mobile:'bot_'+i+'_'+mobile, isBot:true, cards:c, handScore:r.score, handName:r.name, packed:false, seen:false, betTotal: boot });
-    }
-    const table = { boot, pot: boot*3, round:1, turn:0, players, showdown:false, winner:null };
-    teenTables.set(mobile, table);
-    socket.emit('teenpatti:state', teenPublicTable(table, mobile));
-  }catch(e){ console.log('teen join err', e); socket.emit('teenpatti:error',{message:'Join fail ho gaya'}); }
-});
-socket.on('teenpatti:bet', async (data) => {
-  try{
-    const table = teenTables.get(mobile);
-    if(!table || table.showdown) return;
-    if(table.turn!==0) return socket.emit('teenpatti:error',{message:'Teri baari nahi hai'});
-    const me = table.players[0];
-    if(me.packed) return;
-    const type = data?.type;
-    if(type==='PACK'){ me.packed = true; }
-    else if(type==='SEEN'){ me.seen = true; }
-    else if(type==='BLIND' || type==='CHAAL'){
-      const amt = teenGetBet(table.boot, type);
-      const betRes = await placeBet(mobile, amt);
-      if(!betRes.success) return socket.emit('teenpatti:error',{message:'Balance kam hai'});
-      me.betTotal += amt; table.pot += amt;
-    } else return;
-    await teenRunBots(mobile, table);
-    await teenCheckEnd(mobile, table);
-    socket.emit('teenpatti:state', teenPublicTable(table, mobile));
-  }catch(e){ console.log('teen bet err', e); }
-});
-socket.on('teenpatti:show', async () => {
-  try{
-    const table = teenTables.get(mobile);
-    if(!table || table.showdown) return;
-    const me = table.players[0];
-    if(me.packed) return socket.emit('teenpatti:error',{message:'Tu Pack ho chuka hai'});
-    const amt = teenGetBet(table.boot, 'CHAAL');
-    const betRes = await placeBet(mobile, amt);
-    if(!betRes.success) return socket.emit('teenpatti:error',{message:'Balance kam hai'});
-    me.betTotal += amt; table.pot += amt;
-    table.showdown = true;
-    await teenFinish(mobile, table);
-    socket.emit('teenpatti:state', teenPublicTable(table, mobile));
-  }catch(e){ console.log('teen show err', e); }
-});
-socket.on('teenpatti:leave', () => { teenTables.delete(mobile); });
-async function teenRunBots(mobile, table){
-  for(let idx=1; idx<=2; idx++){
-    const bot = table.players[idx];
-    if(bot.packed || table.showdown) continue;
-    const r = Math.random();
-    if(bot.handScore < 210 && r < 0.4){ bot.packed = true; }
-    else { const amt = teenGetBet(table.boot, 'CHAAL'); bot.betTotal += amt; table.pot += amt; }
-  }
-  table.round++;
-  table.turn = 0;
-  if(table.round >= 4){ table.showdown = true; await teenFinish(mobile, table); }
-}
-async function teenCheckEnd(mobile, table){
-  const alive = table.players.filter(p=>!p.packed);
-  if(alive.length===1){ table.showdown = true; await teenFinish(mobile, table); }
-}
-async function teenFinish(mobile, table){
-  const alive = table.players.filter(p=>!p.packed);
-  alive.sort((a,b)=>b.handScore - a.handScore);
-  const win = alive[0];
-  table.winner = { name: win.name, handName: win.handName, isYou: win.mobile===mobile, pot: table.pot };
-  if(win.mobile===mobile){ await creditWin(mobile, table.pot); }
-  setTimeout(()=>{ teenTables.delete(mobile); }, 3000);
-}
-socket.on('teenpatti:get-state', () => {
-  const table = teenTables.get(mobile);
-  if(table) socket.emit('teenpatti:state', teenPublicTable(table, mobile));
-});
-socket.on('disconnect', () => {
-  teenTables.delete(mobile);
-  console.log('Socket disconnected:', mobile);
-});
-});
-
-// --- PART 3 KHATAM - Ab PART 4 yaha se shuru hoga ---
-// ================= PART 4 / 6 - 404 + ERROR HANDLER + SERVER START =================
+// ================= PART 5 / 6 - 404 + ERROR HANDLER + SERVER START =================
 // Ye sabse last me aana chahiye, warna /api/* routes 404 me chale jayenge
 
 app.use((req, res) => {
@@ -1098,8 +898,8 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server on ${PORT} - SECURE V3 - All 15 Games Locked`);
+  console.log(`🚀 Server on ${PORT} - SECURE V4 FIXED - All 15 Games Locked`);
   startAviator();
 });
 
-// ================= SERVER.JS KHATAM - TOTAL 4 PARTS =================
+// ================= SERVER.JS KHATAM - TOTAL 5 PARTS CODE + 1 PART SETUP =================
