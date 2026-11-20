@@ -193,7 +193,24 @@ app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
   if(!/^[6-9][0-9]{9}$/.test(mobile)) return res.json({ success:false, message:'Sahi 10 digit mobile daalo' });
   const otp = String(secureRandomInt(100000, 999999));
   await pool.query(`INSERT INTO otps (mobile, otp, expires_at, attempts) VALUES ($1,$2,NOW() + INTERVAL '5 minutes', 0) ON CONFLICT (mobile) DO UPDATE SET otp=$2, expires_at=NOW() + INTERVAL '5 minutes', attempts=0`, [mobile, otp]);
-  console.log('OTP for', mobile, otp);
+
+  // 2Factor se REAL SMS bhejo
+  try{
+    const apiKey = process.env.TWO_FACTOR_API_KEY || process.env.TWO_FACTOR_APIKEY || '';
+    if(!apiKey){
+      console.log('2Factor Key missing, OTP for', mobile, otp);
+    } else {
+      const url = `https://2factor.in/API/V1/${apiKey}/SMS/+91${mobile}/${otp}/OTP1`;
+      await new Promise((resolve) => {
+        https.get(url, (r) => {
+          let data = '';
+          r.on('data', c => data += c);
+          r.on('end', () => { console.log('2Factor response:', data); resolve(); });
+        }).on('error', (e) => { console.log('2Factor error:', e.message); resolve(); });
+      });
+    }
+  }catch(e){ console.log('2Factor fail:', e.message); }
+
   res.json({ success:true, message:'OTP bhej diya' });
 });
 // Purane naam bhi chalenge
