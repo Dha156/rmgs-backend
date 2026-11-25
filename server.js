@@ -1,4 +1,4 @@
-// ================= ROYAL CASINO - BACKEND SECURE V4 - FIXED AVIATOR + UPI CHANGE =================
+// ================= ROYAL CASINO - BACKEND SECURE V5 - PURA ILAAJ =================
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -110,7 +110,9 @@ function safeHttpsGet(url) {
     req.on('error', reject);
   });
 }
-function makeToken(mobile) { return jwt.sign({ mobile }, process.env.JWT_SECRET, { expiresIn: '1d' }); }
+// ===== PURA ILAAJ - TOKEN 30 DIN + REFRESH 90 DIN =====
+function makeToken(mobile) { return jwt.sign({ mobile }, process.env.JWT_SECRET, { expiresIn: '30d' }); }
+function makeRefreshToken(mobile) { return jwt.sign({ mobile, type: 'refresh' }, process.env.JWT_SECRET, { expiresIn: '90d' }); }
 function checkAuth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ success: false, message: 'Login karo pehle' });
@@ -138,7 +140,6 @@ const DAILY_BET_LIMIT = 20000;
 const MAX_BET = 5000;
 const MIN_BET = 10;
 
-// ===== UPI - Ab Admin Panel se badlega =====
 async function getUpiInfo(){
   try{
     let r1 = await pool.query("SELECT value FROM settings WHERE key='my_upi_id'");
@@ -191,8 +192,8 @@ app.get('/api/payment-info', async (req, res) => {
   let upi = await getUpiInfo();
   res.json({ success: true, upi_id: upi.upi_id, upi_name: upi.upi_name, min_deposit: MY_MIN_DEPOSIT, min_withdraw: MY_MIN_WITHDRAW, daily_deposit_limit: DAILY_DEPOSIT_LIMIT, message: `Min Deposit ₹${MY_MIN_DEPOSIT} | Min Withdraw ₹${MY_MIN_WITHDRAW} | Daily Deposit Limit ₹${DAILY_DEPOSIT_LIMIT}` });
 });
-app.get('/api/health', (req, res) => { res.json({ success: true, msg: 'Backend ON hai - Secure V4', time: new Date().toISOString() }); });
-app.get('/', (req, res) => { res.send('FULL CASINO Running - SECURE V4 - 15 GAMES'); });
+app.get('/api/health', (req, res) => { res.json({ success: true, msg: 'Backend ON hai - Secure V5', time: new Date().toISOString() }); });
+app.get('/', (req, res) => { res.send('FULL CASINO Running - SECURE V5 - 15 GAMES'); });
 
 async function checkBlocked(userId) {
   const r = await pool.query('SELECT is_blocked, self_excluded_until FROM wallets WHERE user_id=$1', [String(userId||'').slice(0,20)]);
@@ -281,6 +282,7 @@ async function handleDepositCreateQR(req, res){
     if (depToday + depositAmount > DAILY_DEPOSIT_LIMIT) return res.status(400).json({ success: false, message: `Aaj ka Deposit Limit ₹${DAILY_DEPOSIT_LIMIT} khatam ho gaya!` });
   }
   let upiInfo = await getUpiInfo();
+  if(!upiInfo.upi_id) return res.status(500).json({ success: false, message: 'UPI set nahi hai, Admin se baat karo' });
   const upiLink = `upi://pay?pa=${upiInfo.upi_id}&pn=${encodeURIComponent(upiInfo.upi_name)}&am=${depositAmount}&cu=INR&tn=${encodeURIComponent('Deposit ' + depositAmount + ' - ' + req.user.mobile)}`;
   const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiLink)}`;
   res.json({ success: true, amount: depositAmount, upi_id: upiInfo.upi_id, upi_name: upiInfo.upi_name, upiLink, qrImage: qrImageUrl, message: `₹${depositAmount} ka QR ban gaya!` });
@@ -367,7 +369,7 @@ async function initDatabase() {
       }
     } else { console.log('⚠️ ADMIN_PASSWORD 10+ char ka nahi dala'); }
   } catch(e){ console.log('Admin create error'); }
-  console.log('DB Ready - SECURE V4');
+  console.log('DB Ready - SECURE V5');
 }
 initDatabase();
 
@@ -415,8 +417,23 @@ app.post('/api/auth/verify-otp', loginLimiter, async (req, res) => {
     const blocked = await checkBlocked(mobile);
     if (blocked.blocked) return res.status(403).json({ success: false, message: blocked.reason });
     const token = makeToken(mobile);
-    res.json({ success: true, token, user: { id: mobile, mobile, name: rec.name || 'Player', balance: w.rows[0].balance, bonus: Number(w.rows[0].bonus_total||0), vip_level: w.rows[0].vip_level } });
+    const refreshToken = makeRefreshToken(mobile);
+    res.json({ success: true, token, refreshToken, user: { id: mobile, mobile, name: rec.name || 'Player', balance: w.rows[0].balance, bonus: Number(w.rows[0].bonus_total||0), vip_level: w.rows[0].vip_level } });
   } catch(e){ res.status(500).json({ success: false, message: 'Login fail' }); }
+});
+
+// ===== TOKEN REFRESH - Bina OTP ke naya Token =====
+app.post('/api/auth/refresh', async (req, res) => {
+  const rt = String(req.body.refreshToken || req.body.refresh_token || '');
+  if(!rt) return res.status(401).json({ success: false, message: 'Refresh nahi hai, dobara Login karo' });
+  try {
+    const d = jwt.verify(rt, process.env.JWT_SECRET);
+    if(d.type !== 'refresh') throw new Error('Galat refresh');
+    const w = await pool.query('SELECT is_blocked FROM wallets WHERE user_id=$1', [d.mobile]);
+    if(w.rows[0]?.is_blocked) return res.status(403).json({ success: false, message: 'Blocked ho' });
+    const newToken = makeToken(d.mobile);
+    return res.json({ success: true, token: newToken, refreshToken: rt });
+  } catch(e){ return res.status(401).json({ success: false, message: 'Dobara Login karo' }); }
 });
 
 app.post('/api/user/self-exclude', checkAuth, async (req, res) => {
@@ -876,7 +893,7 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server on ${PORT} - SECURE V4 - All 15 Games Locked`);
+  console.log(`🚀 Server on ${PORT} - SECURE V5 - All 15 Games Locked`);
   startAviator();
 });
-// ================= SERVER.JS KHATAM =================
+// ================= SERVER.JS KHATAM - V5 =================
